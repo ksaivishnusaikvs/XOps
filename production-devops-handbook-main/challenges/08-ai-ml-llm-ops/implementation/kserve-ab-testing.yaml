@@ -1,0 +1,36 @@
+# KServe A/B Testing Configuration
+# This YAML defines canary deployment for model A/B testing
+
+apiVersion: serving.kserve.io/v1beta1
+kind: InferenceService
+metadata:
+  name: sklearn-ab-test
+  namespace: ml-serving
+spec:
+  predictor:
+    # Canary (Model V2) - receives 20% of traffic
+    canary:
+      canaryTrafficPercent: 20
+      model:
+        modelFormat:
+          name: sklearn
+        storageUri: "s3://models/model-v2"
+        resources:
+          limits:
+            cpu: "1"
+            memory: 2Gi
+          requests:
+            cpu: "100m"
+            memory: 1Gi
+    # Default (Model V1) - receives 80% of traffic
+    model:
+      modelFormat:
+        name: sklearn
+      storageUri: "s3://models/model-v1"
+      resources:
+        limits:
+          cpu: "1"
+          memory: 2Gi
+        requests:
+          cpu: "100m"
+          memory: 1Gi

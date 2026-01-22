@@ -1,0 +1,62 @@
+# AppProject with RBAC Configuration
+# Implements team-based access control for ArgoCD applications
+
+apiVersion: argoproj.io/v1alpha1
+kind: AppProject
+metadata:
+  name: team-platform
+  namespace: argocd
+  finalizers:
+    - resources-finalizer.argocd.argoproj.io
+spec:
+  description: Platform team applications with full access
+  
+  sourceRepos:
+    - '*'  # All repositories
+  
+  destinations:
+    - namespace: '*'
+      server: '*'
+  
+  clusterResourceWhitelist:
+    - group: '*'
+      kind: '*'
+  
+  roles:
+    - name: admin
+      description: Full admin access
+      policies:
+        - p, proj:team-platform:admin, applications, *, team-platform/*, allow
+      groups:
+        - platform-admins
+---
+# ArgoCD Image Updater Configuration
+# Automatically updates container images in GitOps repo
+
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: argocd-image-updater-config
+  namespace: argocd
+data:
+  registries.conf: |
+    registries:
+    - name: GitHub Container Registry
+      prefix: ghcr.io
+      api_url: https://ghcr.io
+      credentials: secret:argocd/github-token#token
+      defaultns: org
+    
+    - name: Docker Hub
+      prefix: docker.io
+      api_url: https://registry-1.docker.io
+      ping: yes
+      credentials: pullsecret:dockerhub-secret
+  
+  git.commit-message-template: |
+    build: update {{.AppName}} image to {{.Image}}:{{.NewTag}}
+    
+    Updated by ArgoCD Image Updater
+    Application: {{.AppName}}
+    Old tag: {{.OldTag}}
+    New tag: {{.NewTag}}

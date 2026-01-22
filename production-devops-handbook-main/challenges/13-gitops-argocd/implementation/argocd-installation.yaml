@@ -1,0 +1,410 @@
+# ArgoCD Installation and Configuration
+# Production-ready ArgoCD setup with HA, SSO, and monitoring
+
+---
+apiVersion: v1
+kind: Namespace
+metadata:
+  name: argocd
+  labels:
+    name: argocd
+    cost-center: platform-engineering
+
+---
+# Install ArgoCD with Helm
+# helm repo add argo https://argoproj.github.io/argo-helm
+# helm install argocd argo/argo-cd -n argocd -f argocd-values.yaml
+
+# argocd-values.yaml
+# High Availability Configuration
+global:
+  image:
+    repository: quay.io/argoproj/argocd
+    tag: v2.9.3
+
+replicaCount: 3
+
+server:
+  replicas: 3
+  autoscaling:
+    enabled: true
+    minReplicas: 3
+    maxReplicas: 10
+    targetCPUUtilizationPercentage: 75
+  
+  ingress:
+    enabled: true
+    annotations:
+      kubernetes.io/ingress.class: nginx
+      cert-manager.io/cluster-issuer: letsencrypt-prod
+      nginx.ingress.kubernetes.io/force-ssl-redirect: "true"
+      nginx.ingress.kubernetes.io/backend-protocol: "HTTPS"
+    hosts:
+      - argocd.example.com
+    tls:
+      - secretName: argocd-tls
+        hosts:
+          - argocd.example.com
+  
+  config:
+    # SSO Configuration with Dex
+    dex.config: |
+      connectors:
+        - type: oidc
+          id: google
+          name: Google
+          config:
+            issuer: https://accounts.google.com
+            clientID: $google-client-id
+            clientSecret: $google-client-secret
+            redirectURI: https://argocd.example.com/api/dex/callback
+        
+        - type: saml
+          id: okta
+          name: Okta
+          config:
+            ssoURL: https://example.okta.com/app/example_argocd/exk.../sso/saml
+            caData: |
+              LS0tLS1CRUdJTi...
+            redirectURI: https://argocd.example.com/api/dex/callback
+    
+    # Repository credentials
+    repositories: |
+      - url: https://github.com/org/gitops-config
+        passwordSecret:
+          name: github-secret
+          key: password
+        usernameSecret:
+          name: github-secret
+          key: username
+      
+      - url: https://github.com/org/helm-charts
+        type: helm
+        passwordSecret:
+          name: github-secret
+          key: password
+    
+    # Resource customizations for health checks
+    resource.customizations: |
+      argoproj.io/Rollout:
+        health.lua: |
+          hs = {}
+          if obj.status ~= nil then
+            if obj.status.phase == "Degraded" then
+              hs.status = "Degraded"
+              hs.message = obj.status.message
+              return hs
+            end
+            if obj.status.phase == "Progressing" then
+              hs.status = "Progressing"
+              hs.message = "Rollout is progressing"
+              return hs
+            end
+          end
+          hs.status = "Healthy"
+          return hs
+    
+    # Application settings
+    application.instanceLabelKey: argocd.argoproj.io/instance
+    
+    # Timeout settings
+    timeout.reconciliation: 180s
+    timeout.hard.reconciliation: 0s
+  
+  # RBAC Configuration
+  rbacConfig:
+    policy.default: role:readonly
+    policy.csv: |
+      # Admin role
+      p, role:admin, applications, *, */*, allow
+      p, role:admin, clusters, *, *, allow
+      p, role:admin, repositories, *, *, allow
+      p, role:admin, projects, *, *, allow
+      
+      # Developer role
+      p, role:developer, applications, get, */*, allow
+      p, role:developer, applications, sync, */*, allow
+      p, role:developer, applications, create, */dev-*, allow
+      p, role:developer, applications, delete, */dev-*, allow
+      p, role:developer, projects, get, *, allow
+      
+      # Operations role
+      p, role:ops, applications, *, */*, allow
+      p, role:ops, applications, delete, */prod-*, deny
+      p, role:ops, clusters, get, *, allow
+      p, role:ops, repositories, get, *, allow
+      
+      # Map groups to roles
+      g, platform-team, role:admin
+      g, developers, role:developer
+      g, ops-team, role:ops
+
+repoServer:
+  replicas: 3
+  autoscaling:
+    enabled: true
+    minReplicas: 3
+    maxReplicas: 10
+  
+  resources:
+    limits:
+      cpu: 1000m
+      memory: 1Gi
+    requests:
+      cpu: 250m
+      memory: 256Mi
+  
+  volumes:
+    - name: custom-tools
+      emptyDir: {}
+  
+  volumeMounts:
+    - mountPath: /custom-tools
+      name: custom-tools
+  
+  # Install custom tools (Helm, Kustomize, etc.)
+  initContainers:
+    - name: install-tools
+      image: alpine:3.18
+      command: ["/bin/sh", "-c"]
+      args:
+        - |
+          set -e
+          # Install Helm
+          wget https://get.helm.sh/helm-v3.13.0-linux-amd64.tar.gz
+          tar -zxvf helm-v3.13.0-linux-amd64.tar.gz
+          mv linux-amd64/helm /custom-tools/
+          
+          # Install Kustomize
+          wget https://github.com/kubernetes-sigs/kustomize/releases/download/kustomize%2Fv5.2.1/kustomize_v5.2.1_linux_amd64.tar.gz
+          tar -zxvf kustomize_v5.2.1_linux_amd64.tar.gz
+          mv kustomize /custom-tools/
+          
+          chmod +x /custom-tools/*
+      volumeMounts:
+        - mountPath: /custom-tools
+          name: custom-tools
+
+controller:
+  replicas: 3
+  
+  resources:
+    limits:
+      cpu: 2000m
+      memory: 2Gi
+    requests:
+      cpu: 500m
+      memory: 512Mi
+  
+  # Metrics for monitoring
+  metrics:
+    enabled: true
+    serviceMonitor:
+      enabled: true
+      selector:
+        prometheus: kube-prometheus
+  
+  # Application status refresh
+  appResyncPeriod: 180  # 3 minutes
+  
+  # Self-heal settings
+  selfHeal:
+    enabled: true
+    timeout: 5
+
+applicationSet:
+  enabled: true
+  replicas: 2
+  
+  resources:
+    limits:
+      cpu: 500m
+      memory: 512Mi
+    requests:
+      cpu: 100m
+      memory: 128Mi
+
+notifications:
+  enabled: true
+  
+  argocdUrl: https://argocd.example.com
+  
+  # Notification triggers
+  triggers:
+    trigger.on-deployed: |
+      - when: app.status.operationState.phase in ['Succeeded']
+        send: [app-deployed]
+    
+    trigger.on-health-degraded: |
+      - when: app.status.health.status == 'Degraded'
+        send: [app-health-degraded]
+    
+    trigger.on-sync-failed: |
+      - when: app.status.operationState.phase in ['Error', 'Failed']
+        send: [app-sync-failed]
+  
+  # Notification templates
+  templates:
+    template.app-deployed: |
+      message: |
+        Application {{.app.metadata.name}} deployed successfully.
+        Sync status: {{.app.status.sync.status}}
+        Health status: {{.app.status.health.status}}
+    
+    template.app-health-degraded: |
+      message: |
+        ⚠️ Application {{.app.metadata.name}} health is DEGRADED
+        Previous status: {{.app.status.health.message}}
+    
+    template.app-sync-failed: |
+      message: |
+        ❌ Application {{.app.metadata.name}} sync FAILED
+        Error: {{.app.status.operationState.message}}
+  
+  # Slack notifications
+  notifiers:
+    service.slack: |
+      token: $slack-token
+  
+  subscriptions:
+    - recipients:
+        - slack:deployments-channel
+      triggers:
+        - on-deployed
+        - on-health-degraded
+        - on-sync-failed
+
+# Redis HA for caching
+redis-ha:
+  enabled: true
+  haproxy:
+    enabled: true
+    replicas: 3
+
+---
+# Secret for GitHub authentication
+apiVersion: v1
+kind: Secret
+metadata:
+  name: github-secret
+  namespace: argocd
+type: Opaque
+stringData:
+  username: argocd-bot
+  password: <GITHUB_PAT_TOKEN>
+
+---
+# ServiceMonitor for Prometheus
+apiVersion: monitoring.coreos.com/v1
+kind: ServiceMonitor
+metadata:
+  name: argocd-metrics
+  namespace: argocd
+spec:
+  selector:
+    matchLabels:
+      app.kubernetes.io/name: argocd-metrics
+  endpoints:
+    - port: metrics
+
+---
+# NetworkPolicy for ArgoCD
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: argocd-network-policy
+  namespace: argocd
+spec:
+  podSelector:
+    matchLabels:
+      app.kubernetes.io/part-of: argocd
+  policyTypes:
+    - Ingress
+    - Egress
+  ingress:
+    - from:
+        - namespaceSelector:
+            matchLabels:
+              name: ingress-nginx
+      ports:
+        - protocol: TCP
+          port: 8080
+  egress:
+    - to:
+        - namespaceSelector: {}
+      ports:
+        - protocol: TCP
+          port: 443
+    - to:
+        - namespaceSelector:
+            matchLabels:
+              name: kube-system
+      ports:
+        - protocol: UDP
+          port: 53
+
+---
+# ConfigMap for custom resource definitions
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: argocd-cm-patch
+  namespace: argocd
+data:
+  # Enable anonymous read-only access
+  users.anonymous.enabled: "false"
+  
+  # Application sync settings
+  application.sync.options: |
+    CreateNamespace=true
+    PrunePropagationPolicy=foreground
+  
+  # Webhook configuration
+  webhook.github.secret: <WEBHOOK_SECRET>
+  
+  # Status badge
+  statusbadge.enabled: "true"
+  
+  # Kustomize build options
+  kustomize.buildOptions: "--enable-helm"
+
+---
+# Installation script
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: installation-guide
+  namespace: argocd
+data:
+  install.sh: |
+    #!/bin/bash
+    # ArgoCD Installation Script
+    
+    echo "Installing ArgoCD..."
+    
+    # Add Argo Helm repository
+    helm repo add argo https://argoproj.github.io/argo-helm
+    helm repo update
+    
+    # Install ArgoCD
+    helm install argocd argo/argo-cd \
+      --namespace argocd \
+      --create-namespace \
+      --values argocd-values.yaml \
+      --version 5.51.0
+    
+    # Wait for ArgoCD to be ready
+    kubectl wait --for=condition=available \
+      --timeout=600s \
+      deployment/argocd-server \
+      -n argocd
+    
+    # Get initial admin password
+    kubectl -n argocd get secret argocd-initial-admin-secret \
+      -o jsonpath="{.data.password}" | base64 -d
+    
+    echo ""
+    echo "ArgoCD installed successfully!"
+    echo "Access UI: https://argocd.example.com"
+    echo "Username: admin"
+    echo "Password: (see above)"

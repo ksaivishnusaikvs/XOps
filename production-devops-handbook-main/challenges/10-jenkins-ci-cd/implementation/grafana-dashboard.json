@@ -1,0 +1,314 @@
+# Grafana Dashboard for Jenkins Metrics
+# Import this JSON into Grafana to visualize Jenkins pipeline performance
+
+{
+  "dashboard": {
+    "title": "Jenkins CI/CD Metrics",
+    "tags": ["jenkins", "cicd", "devops"],
+    "timezone": "browser",
+    "schemaVersion": 16,
+    "version": 1,
+    "refresh": "30s",
+    
+    "panels": [
+      {
+        "id": 1,
+        "title": "Build Success Rate",
+        "type": "stat",
+        "targets": [
+          {
+            "expr": "sum(rate(jenkins_builds_total{result=\"SUCCESS\"}[5m])) / sum(rate(jenkins_builds_total[5m])) * 100",
+            "legendFormat": "Success Rate"
+          }
+        ],
+        "gridPos": {"h": 4, "w": 6, "x": 0, "y": 0},
+        "options": {
+          "unit": "percent",
+          "thresholds": {
+            "mode": "absolute",
+            "steps": [
+              {"value": 0, "color": "red"},
+              {"value": 80, "color": "yellow"},
+              {"value": 95, "color": "green"}
+            ]
+          }
+        }
+      },
+      
+      {
+        "id": 2,
+        "title": "Average Build Duration",
+        "type": "stat",
+        "targets": [
+          {
+            "expr": "avg(jenkins_build_duration_seconds)",
+            "legendFormat": "Avg Duration"
+          }
+        ],
+        "gridPos": {"h": 4, "w": 6, "x": 6, "y": 0},
+        "options": {
+          "unit": "s",
+          "thresholds": {
+            "mode": "absolute",
+            "steps": [
+              {"value": 0, "color": "green"},
+              {"value": 600, "color": "yellow"},
+              {"value": 1800, "color": "red"}
+            ]
+          }
+        }
+      },
+      
+      {
+        "id": 3,
+        "title": "Queue Size",
+        "type": "stat",
+        "targets": [
+          {
+            "expr": "jenkins_build_queue_size",
+            "legendFormat": "Queue"
+          }
+        ],
+        "gridPos": {"h": 4, "w": 6, "x": 12, "y": 0},
+        "options": {
+          "unit": "short",
+          "thresholds": {
+            "mode": "absolute",
+            "steps": [
+              {"value": 0, "color": "green"},
+              {"value": 5, "color": "yellow"},
+              {"value": 10, "color": "red"}
+            ]
+          }
+        }
+      },
+      
+      {
+        "id": 4,
+        "title": "Executor Utilization",
+        "type": "gauge",
+        "targets": [
+          {
+            "expr": "jenkins_executor_busy / jenkins_executor_total * 100",
+            "legendFormat": "Utilization"
+          }
+        ],
+        "gridPos": {"h": 4, "w": 6, "x": 18, "y": 0},
+        "options": {
+          "unit": "percent",
+          "thresholds": {
+            "mode": "absolute",
+            "steps": [
+              {"value": 0, "color": "green"},
+              {"value": 70, "color": "yellow"},
+              {"value": 90, "color": "red"}
+            ]
+          }
+        }
+      },
+      
+      {
+        "id": 5,
+        "title": "Build Duration by Job",
+        "type": "graph",
+        "targets": [
+          {
+            "expr": "histogram_quantile(0.95, sum(rate(jenkins_build_duration_seconds_bucket[5m])) by (job, le))",
+            "legendFormat": "{{job}} (p95)"
+          }
+        ],
+        "gridPos": {"h": 8, "w": 12, "x": 0, "y": 4},
+        "yaxes": [
+          {"format": "s", "label": "Duration"},
+          {"format": "short"}
+        ],
+        "lines": true,
+        "fill": 1,
+        "linewidth": 2,
+        "legend": {
+          "show": true,
+          "alignAsTable": true,
+          "rightSide": false,
+          "values": true,
+          "current": true,
+          "avg": true,
+          "max": true
+        }
+      },
+      
+      {
+        "id": 6,
+        "title": "Build Results Over Time",
+        "type": "graph",
+        "targets": [
+          {
+            "expr": "sum(rate(jenkins_builds_total{result=\"SUCCESS\"}[5m]))",
+            "legendFormat": "Success"
+          },
+          {
+            "expr": "sum(rate(jenkins_builds_total{result=\"FAILURE\"}[5m]))",
+            "legendFormat": "Failure"
+          },
+          {
+            "expr": "sum(rate(jenkins_builds_total{result=\"UNSTABLE\"}[5m]))",
+            "legendFormat": "Unstable"
+          },
+          {
+            "expr": "sum(rate(jenkins_builds_total{result=\"ABORTED\"}[5m]))",
+            "legendFormat": "Aborted"
+          }
+        ],
+        "gridPos": {"h": 8, "w": 12, "x": 12, "y": 4},
+        "yaxes": [
+          {"format": "short", "label": "Builds/sec"},
+          {"format": "short"}
+        ],
+        "stack": true,
+        "fill": 2,
+        "linewidth": 1
+      },
+      
+      {
+        "id": 7,
+        "title": "Job Health Score",
+        "type": "table",
+        "targets": [
+          {
+            "expr": "jenkins_job_health_score",
+            "format": "table",
+            "instant": true
+          }
+        ],
+        "gridPos": {"h": 8, "w": 8, "x": 0, "y": 12},
+        "styles": [
+          {
+            "pattern": "Value",
+            "type": "number",
+            "unit": "short",
+            "decimals": 0,
+            "colorMode": "cell",
+            "colors": ["red", "yellow", "green"],
+            "thresholds": [50, 80]
+          }
+        ],
+        "transform": "table"
+      },
+      
+      {
+        "id": 8,
+        "title": "Recent Build Failures",
+        "type": "table",
+        "targets": [
+          {
+            "expr": "topk(10, increase(jenkins_builds_total{result=\"FAILURE\"}[1h]))",
+            "format": "table",
+            "instant": true
+          }
+        ],
+        "gridPos": {"h": 8, "w": 8, "x": 8, "y": 12},
+        "styles": [
+          {
+            "pattern": "Value",
+            "type": "number",
+            "unit": "short",
+            "decimals": 0,
+            "colorMode": "cell",
+            "colors": ["green", "yellow", "red"],
+            "thresholds": [1, 5]
+          }
+        ]
+      },
+      
+      {
+        "id": 9,
+        "title": "Node Status",
+        "type": "piechart",
+        "targets": [
+          {
+            "expr": "jenkins_node_total",
+            "legendFormat": "{{status}}"
+          }
+        ],
+        "gridPos": {"h": 8, "w": 8, "x": 16, "y": 12},
+        "options": {
+          "legend": {
+            "display": true,
+            "placement": "right"
+          }
+        }
+      },
+      
+      {
+        "id": 10,
+        "title": "Build Frequency (Builds/Hour)",
+        "type": "graph",
+        "targets": [
+          {
+            "expr": "sum(rate(jenkins_builds_total[1h])) * 3600",
+            "legendFormat": "Total Builds"
+          }
+        ],
+        "gridPos": {"h": 6, "w": 12, "x": 0, "y": 20},
+        "yaxes": [
+          {"format": "short", "label": "Builds/hour"},
+          {"format": "short"}
+        ],
+        "lines": true,
+        "fill": 1
+      },
+      
+      {
+        "id": 11,
+        "title": "Plugin Status",
+        "type": "stat",
+        "targets": [
+          {
+            "expr": "jenkins_plugin_total{status=\"active\"}",
+            "legendFormat": "Active Plugins"
+          }
+        ],
+        "gridPos": {"h": 6, "w": 12, "x": 12, "y": 20},
+        "options": {
+          "unit": "short",
+          "orientation": "horizontal"
+        }
+      }
+    ],
+    
+    "templating": {
+      "list": [
+        {
+          "name": "job",
+          "type": "query",
+          "query": "label_values(jenkins_builds_total, job)",
+          "multi": true,
+          "includeAll": true
+        },
+        {
+          "name": "interval",
+          "type": "interval",
+          "query": "5m,10m,30m,1h,6h,12h,1d",
+          "auto": false,
+          "current": {
+            "text": "5m",
+            "value": "5m"
+          }
+        }
+      ]
+    },
+    
+    "annotations": {
+      "list": [
+        {
+          "name": "Deployments",
+          "datasource": "Prometheus",
+          "expr": "changes(jenkins_job_last_success_timestamp{job=~\".*production.*\"}[5m]) > 0",
+          "titleFormat": "Deployment",
+          "textFormat": "{{job}}",
+          "iconColor": "green",
+          "enable": true
+        }
+      ]
+    }
+  }
+}

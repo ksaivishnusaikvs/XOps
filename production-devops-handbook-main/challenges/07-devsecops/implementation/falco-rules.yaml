@@ -1,0 +1,81 @@
+# Falco Runtime Security Rules
+# Detects suspicious runtime behavior in containers
+
+# Detect shell spawned in container
+- rule: Shell Spawned in Container
+  desc: Detect shell spawned in a container
+  condition: >
+    spawned_process and 
+    container and
+    proc.name in (shell_binaries)
+  output: >
+    Shell spawned in container
+    (user=%user.name container_id=%container.id image=%container.image.repository
+    proc=%proc.cmdline)
+  priority: WARNING
+  tags: [container, shell]
+
+# Detect sensitive file access
+- rule: Read sensitive file untrusted
+  desc: Detect access to sensitive files
+  condition: >
+    open_read and
+    sensitive_files and
+    not trusted_containers
+  output: >
+    Sensitive file accessed
+    (user=%user.name file=%fd.name container=%container.id image=%container.image)
+  priority: WARNING
+
+# Detect package management in container
+- rule: Package Management in Container
+  desc: Detect package installation in running container
+  condition: >
+    spawned_process and
+    container and
+    proc.name in (package_mgmt_binaries)
+  output: >
+    Package management tool executed in container
+    (user=%user.name command=%proc.cmdline container=%container.id)
+  priority: ERROR
+  tags: [container, package_management]
+
+# Detect privilege escalation
+- rule: Privilege Escalation
+  desc: Detect privilege escalation attempts
+  condition: >
+    spawned_process and
+    container and
+    proc.name in (sudo, su)
+  output: >
+    Privilege escalation attempt
+    (user=%user.name command=%proc.cmdline container=%container.id)
+  priority: CRITICAL
+  tags: [privilege_escalation]
+
+# Detect unexpected network connections
+- rule: Unexpected outbound connection
+  desc: Detect unexpected outbound network connection
+  condition: >
+    outbound and
+    container and
+    not trusted_network and
+    not proc.name in (allowed_network_binaries)
+  output: >
+    Unexpected outbound connection
+    (user=%user.name connection=%fd.name container=%container.id)
+  priority: WARNING
+  tags: [network]
+
+# Detect crypto mining
+- rule: Detect crypto miners
+  desc: Detect common crypto mining activity
+  condition: >
+    spawned_process and
+    container and
+    proc.name in (xmrig, minerd, cpuminer)
+  output: >
+    Crypto miner detected
+    (user=%user.name command=%proc.cmdline container=%container.id)
+  priority: CRITICAL
+  tags: [malware, crypto]

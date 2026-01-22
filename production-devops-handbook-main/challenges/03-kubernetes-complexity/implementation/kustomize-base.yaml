@@ -1,0 +1,61 @@
+# Kustomize Base Configuration
+# Base resources that are common across all environments
+
+apiVersion: kustomize.config.k8s.io/v1beta1
+kind: Kustomization
+
+namespace: default
+
+# Common labels applied to all resources
+commonLabels:
+  app: myapp
+  managed-by: kustomize
+
+# Common annotations
+commonAnnotations:
+  contact: "devops@example.com"
+
+resources:
+  - deployment.yaml
+  - service.yaml
+  - configmap.yaml
+  - serviceaccount.yaml
+
+# Images that will be overridden in overlays
+images:
+  - name: myapp
+    newName: myregistry/myapp
+    newTag: latest
+
+# ConfigMap generator
+configMapGenerator:
+  - name: myapp-config
+    literals:
+      - LOG_LEVEL=info
+      - MAX_CONNECTIONS=100
+
+# Secret generator (use external secret management in production)
+secretGenerator:
+  - name: myapp-secrets
+    literals:
+      - DATABASE_URL=postgresql://localhost:5432/myapp
+
+generatorOptions:
+  disableNameSuffixHash: true
+
+# Patches applied to all environments
+patches:
+  - patch: |-
+      apiVersion: apps/v1
+      kind: Deployment
+      metadata:
+        name: myapp
+      spec:
+        template:
+          spec:
+            securityContext:
+              runAsNonRoot: true
+              runAsUser: 1000
+              fsGroup: 1000
+    target:
+      kind: Deployment

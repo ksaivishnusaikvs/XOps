@@ -1,0 +1,68 @@
+# Multi-stage Dockerfile with Optimizations
+# Demonstrates best practices for build caching and small image sizes
+
+# Build stage
+FROM node:20-alpine AS builder
+
+# Install build dependencies in a separate layer
+RUN apk add --no-cache \
+    python3 \
+    make \
+    g++ \
+    git
+
+# Set working directory
+WORKDIR /app
+
+# Copy package files first (better caching)
+COPY package*.json ./
+
+# Install dependencies with npm ci for reproducible builds
+RUN npm ci --only=production && \
+    npm cache clean --force
+
+# Copy application code
+COPY . .
+
+# Build application
+RUN npm run build
+
+# Production stage
+FROM node:20-alpine
+
+# Add non-root user for security
+RUN addgroup -g 1001 -S nodejs && \
+    adduser -S nodejs -u 1001
+
+# Install production runtime dependencies only
+RUN apk add --no-cache \
+    dumb-init \
+    ca-certificates
+
+WORKDIR /app
+
+# Copy built application from builder
+COPY --from=builder --chown=nodejs:nodejs /app/dist ./dist
+COPY --from=builder --chown=nodejs:nodejs /app/node_modules ./node_modules
+COPY --from=builder --chown=nodejs:nodejs /app/package*.json ./
+
+# Use non-root user
+USER nodejs
+
+# Use dumb-init to handle signals properly
+ENTRYPOINT ["dumb-init", "--"]
+
+# Health check
+HEALTHCHECK --interval=30s --timeout=3s --start-period=5s --retries=3 \
+    CMD node healthcheck.js
+
+# Expose port
+EXPOSE 3000
+
+# Start application
+CMD ["node", "dist/index.js"]
+
+# Metadata labels
+LABEL org.opencontainers.image.title="My Application"
+LABEL org.opencontainers.image.description="Optimized production container"
+LABEL org.opencontainers.image.vendor="Your Company"

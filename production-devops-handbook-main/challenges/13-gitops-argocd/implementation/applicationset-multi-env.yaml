@@ -1,0 +1,331 @@
+# ApplicationSet for Multi-Environment Microservices Deployment
+# Automatically generates Applications for each environment
+
+apiVersion: argoproj.io/v1alpha1
+kind: ApplicationSet
+metadata:
+  name: microservices
+  namespace: argocd
+spec:
+  generators:
+    # List generator for environments
+    - list:
+        elements:
+          - env: dev
+            cluster: https://kubernetes.default.svc
+            namespace: dev
+            repoRevision: main
+            autoSync: "true"
+            selfHeal: "true"
+            prune: "true"
+            replicas: "2"
+            resources:
+              cpu: "100m"
+              memory: "128Mi"
+          
+          - env: staging
+            cluster: https://gke-staging.example.com
+            namespace: staging
+            repoRevision: main
+            autoSync: "false"  # Manual sync for staging
+            selfHeal: "true"
+            prune: "true"
+            replicas: "3"
+            resources:
+              cpu: "250m"
+              memory: "512Mi"
+          
+          - env: production
+            cluster: https://aks-prod.example.com
+            namespace: production
+            repoRevision: release
+            autoSync: "false"  # Manual sync with approval
+            selfHeal: "false"  # No auto-heal in prod
+            prune: "false"     # No auto-prune in prod
+            replicas: "10"
+            resources:
+              cpu: "500m"
+              memory: "1Gi"
+  
+  template:
+    metadata:
+      name: '{{env}}-microservice-{{app}}'
+      labels:
+        environment: '{{env}}'
+        team: platform
+      annotations:
+        notifications.argoproj.io/subscribe.on-sync-succeeded.slack: deployments-{{env}}
+        notifications.argoproj.io/subscribe.on-sync-failed.slack: deployments-alerts
+    
+    spec:
+      project: microservices-project
+      
+      source:
+        repoURL: https://github.com/org/gitops-config
+        targetRevision: '{{repoRevision}}'
+        path: 'apps/{{app}}/overlays/{{env}}'
+        
+        # Kustomize options
+        kustomize:
+          commonAnnotations:
+            environment: '{{env}}'
+            managed-by: argocd
+          
+          images:
+            - name: app-image
+              newTag: '{{image.tag}}'
+          
+          replicas:
+            - name: deployment
+              count: '{{replicas}}'
+      
+      destination:
+        server: '{{cluster}}'
+        namespace: '{{namespace}}'
+      
+      syncPolicy:
+        automated:
+          prune: {{prune}}
+          selfHeal: {{selfHeal}}
+          allowEmpty: false
+        
+        syncOptions:
+          - CreateNamespace=true
+          - PrunePropagationPolicy=foreground
+          - PruneLast=true
+        
+        retry:
+          limit: 5
+          backoff:
+            duration: 5s
+            factor: 2
+            maxDuration: 3m
+      
+      # Ignore differences in specific fields
+      ignoreDifferences:
+        - group: apps
+          kind: Deployment
+          jsonPointers:
+            - /spec/replicas  # Ignore HPA changes
+        - group: ""
+          kind: Secret
+          jsonPointers:
+            - /data
+      
+      # Health check configuration
+      revisionHistoryLimit: 10
+
+---
+# ApplicationSet using Git generator (multi-repo)
+apiVersion: argoproj.io/v1alpha1
+kind: ApplicationSet
+metadata:
+  name: team-applications
+  namespace: argocd
+spec:
+  generators:
+    - git:
+        repoURL: https://github.com/org/gitops-config
+        revision: main
+        directories:
+          - path: apps/team-*/*
+  
+  template:
+    metadata:
+      name: '{{path.basename}}'
+    spec:
+      project: default
+      source:
+        repoURL: https://github.com/org/gitops-config
+        targetRevision: main
+        path: '{{path}}'
+      destination:
+        server: https://kubernetes.default.svc
+        namespace: '{{path[1]}}'
+      syncPolicy:
+        automated:
+          prune: true
+          selfHeal: true
+
+---
+# ApplicationSet with Pull Request Generator
+# Creates preview environments for each PR
+apiVersion: argoproj.io/v1alpha1
+kind: ApplicationSet
+metadata:
+  name: pr-preview-environments
+  namespace: argocd
+spec:
+  generators:
+    - pullRequest:
+        github:
+          owner: org
+          repo: application-repo
+          tokenRef:
+            secretName: github-token
+            key: token
+          labels:
+            - preview
+  
+  template:
+    metadata:
+      name: 'pr-{{number}}-preview'
+      annotations:
+        argocd-image-updater.argoproj.io/image-list: app=ghcr.io/org/app:pr-{{number}}
+    spec:
+      project: preview
+      source:
+        repoURL: https://github.com/org/gitops-config
+        targetRevision: '{{head_sha}}'
+        path: apps/preview
+        helm:
+          parameters:
+            - name: image.tag
+              value: 'pr-{{number}}'
+            - name: ingress.host
+              value: 'pr-{{number}}.preview.example.com'
+      destination:
+        server: https://kubernetes.default.svc
+        namespace: 'pr-{{number}}'
+      syncPolicy:
+        automated:
+          prune: true
+          selfHeal: true
+        syncOptions:
+          - CreateNamespace=true
+
+---
+# ApplicationSet for Multi-Cluster Deployment
+apiVersion: argoproj.io/v1alpha1
+kind: ApplicationSet
+metadata:
+  name: multi-cluster-app
+  namespace: argocd
+spec:
+  generators:
+    - clusters:
+        selector:
+          matchLabels:
+            environment: production
+        values:
+          revision: release
+    
+    - clusters:
+        selector:
+          matchLabels:
+            environment: staging
+        values:
+          revision: main
+  
+  template:
+    metadata:
+      name: '{{name}}-myapp'
+    spec:
+      project: production
+      source:
+        repoURL: https://github.com/org/gitops-config
+        targetRevision: '{{values.revision}}'
+        path: apps/myapp
+      destination:
+        server: '{{server}}'
+        namespace: myapp
+      syncPolicy:
+        automated:
+          prune: true
+
+---
+# ApplicationSet with Matrix Generator
+# Combines multiple generators
+apiVersion: argoproj.io/v1alpha1
+kind: ApplicationSet
+metadata:
+  name: matrix-example
+  namespace: argocd
+spec:
+  generators:
+    - matrix:
+        generators:
+          - git:
+              repoURL: https://github.com/org/gitops-config
+              revision: main
+              directories:
+                - path: apps/*
+          
+          - list:
+              elements:
+                - cluster: dev-cluster
+                  url: https://dev.k8s.local
+                - cluster: prod-cluster
+                  url: https://prod.k8s.local
+  
+  template:
+    metadata:
+      name: '{{path.basename}}-{{cluster}}'
+    spec:
+      project: default
+      source:
+        repoURL: https://github.com/org/gitops-config
+        targetRevision: main
+        path: '{{path}}'
+      destination:
+        server: '{{url}}'
+        namespace: '{{path.basename}}'
+
+---
+# ApplicationSet with Progressive Sync (Waves)
+apiVersion: argoproj.io/v1alpha1
+kind: ApplicationSet
+metadata:
+  name: progressive-rollout
+  namespace: argocd
+spec:
+  generators:
+    - list:
+        elements:
+          - region: us-east-1
+            cluster: https://eks-use1.example.com
+            wave: "0"  # Deploy first
+          
+          - region: us-west-2
+            cluster: https://eks-usw2.example.com
+            wave: "1"  # Deploy second
+          
+          - region: eu-west-1
+            cluster: https://eks-euw1.example.com
+            wave: "2"  # Deploy last
+  
+  strategy:
+    type: RollingSync
+    rollingSync:
+      steps:
+        - matchExpressions:
+            - key: wave
+              operator: In
+              values: ["0"]
+        - matchExpressions:
+            - key: wave
+              operator: In
+              values: ["1"]
+        - matchExpressions:
+            - key: wave
+              operator: In
+              values: ["2"]
+  
+  template:
+    metadata:
+      name: 'app-{{region}}'
+      labels:
+        wave: '{{wave}}'
+    spec:
+      project: global
+      source:
+        repoURL: https://github.com/org/gitops-config
+        targetRevision: main
+        path: apps/myapp
+      destination:
+        server: '{{cluster}}'
+        namespace: myapp
+      syncPolicy:
+        automated:
+          prune: true
+          selfHeal: true

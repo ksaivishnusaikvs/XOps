@@ -1,0 +1,305 @@
+# Jenkins Configuration as Code (JCasC)
+# This file defines the entire Jenkins master configuration
+
+jenkins:
+  systemMessage: "Production Jenkins - Managed by Configuration as Code"
+  numExecutors: 0  # Master should not run builds
+  mode: EXCLUSIVE
+  scmCheckoutRetryCount: 3
+  disableRememberMe: true
+  
+  # Global Security Configuration
+  securityRealm:
+    ldap:
+      configurations:
+        - server: "ldap://ldap.company.com:389"
+          rootDN: "dc=company,dc=com"
+          userSearchBase: "ou=users"
+          userSearch: "uid={0}"
+          groupSearchBase: "ou=groups"
+          groupSearchFilter: "memberUid={1}"
+          managerDN: "cn=jenkins,ou=service-accounts,dc=company,dc=com"
+          managerPasswordSecret: "${LDAP_MANAGER_PASSWORD}"
+          
+  authorizationStrategy:
+    roleBased:
+      roles:
+        global:
+          - name: "admin"
+            description: "Jenkins Administrators"
+            permissions:
+              - "Overall/Administer"
+            assignments:
+              - "admins"
+              
+          - name: "developer"
+            description: "Developers with build permissions"
+            permissions:
+              - "Overall/Read"
+              - "Job/Build"
+              - "Job/Cancel"
+              - "Job/Read"
+              - "Job/Workspace"
+              - "Run/Replay"
+              - "Run/Update"
+              - "View/Read"
+            assignments:
+              - "developers"
+              
+          - name: "viewer"
+            description: "Read-only users"
+            permissions:
+              - "Overall/Read"
+              - "Job/Read"
+              - "View/Read"
+            assignments:
+              - "viewers"
+
+# Security Configuration
+security:
+  gitHostKeyVerificationConfiguration:
+    sshHostKeyVerificationStrategy: "knownHostsFileVerificationStrategy"
+    
+  apiToken:
+    creationOfLegacyTokenEnabled: false
+    tokenGenerationOnCreationEnabled: false
+    usageStatisticsEnabled: true
+    
+  remotingCLI:
+    enabled: false
+
+# Cloud Configuration - Kubernetes
+clouds:
+  - kubernetes:
+      name: "kubernetes"
+      serverUrl: "https://kubernetes.default"
+      skipTlsVerify: false
+      namespace: "jenkins-agents"
+      jenkinsUrl: "http://jenkins.jenkins:8080"
+      jenkinsTunnel: "jenkins-agent.jenkins:50000"
+      connectTimeout: 5
+      readTimeout: 15
+      containerCapStr: "100"
+      maxRequestsPerHostStr: "32"
+      retentionTimeout: 5
+      
+      templates:
+        - name: "maven-agent"
+          label: "maven"
+          nodeUsageMode: EXCLUSIVE
+          containers:
+            - name: "maven"
+              image: "maven:3.8-openjdk-11"
+              alwaysPullImage: true
+              workingDir: "/home/jenkins/agent"
+              ttyEnabled: true
+              resourceRequestCpu: "500m"
+              resourceRequestMemory: "1Gi"
+              resourceLimitCpu: "2"
+              resourceLimitMemory: "4Gi"
+          volumes:
+            - hostPathVolume:
+                hostPath: "/var/run/docker.sock"
+                mountPath: "/var/run/docker.sock"
+          yaml: |
+            apiVersion: v1
+            kind: Pod
+            spec:
+              serviceAccountName: jenkins-agent
+              
+        - name: "node-agent"
+          label: "nodejs"
+          nodeUsageMode: EXCLUSIVE
+          containers:
+            - name: "nodejs"
+              image: "node:16-alpine"
+              alwaysPullImage: true
+              workingDir: "/home/jenkins/agent"
+              ttyEnabled: true
+              resourceRequestCpu: "500m"
+              resourceRequestMemory: "1Gi"
+              resourceLimitCpu: "2"
+              resourceLimitMemory: "2Gi"
+              
+        - name: "python-agent"
+          label: "python"
+          nodeUsageMode: EXCLUSIVE
+          containers:
+            - name: "python"
+              image: "python:3.9-slim"
+              alwaysPullImage: true
+              workingDir: "/home/jenkins/agent"
+              ttyEnabled: true
+              resourceRequestCpu: "500m"
+              resourceRequestMemory: "1Gi"
+              resourceLimitCpu: "1"
+              resourceLimitMemory: "2Gi"
+
+# Credentials Configuration
+credentials:
+  system:
+    domainCredentials:
+      - credentials:
+          # Vault Token
+          - vaultTokenCredential:
+              scope: GLOBAL
+              id: "vault-token"
+              description: "HashiCorp Vault Token"
+              token: "${VAULT_TOKEN}"
+              
+          # SSH Key for Git
+          - basicSSHUserPrivateKey:
+              scope: GLOBAL
+              id: "git-ssh-key"
+              username: "jenkins"
+              description: "SSH key for Git repositories"
+              privateKeySource:
+                directEntry:
+                  privateKey: "${GIT_SSH_PRIVATE_KEY}"
+                  
+          # Docker Registry
+          - usernamePassword:
+              scope: GLOBAL
+              id: "docker-registry"
+              description: "Docker Registry Credentials"
+              username: "${DOCKER_REGISTRY_USER}"
+              password: "${DOCKER_REGISTRY_PASS}"
+              
+          # SonarQube Token
+          - string:
+              scope: GLOBAL
+              id: "sonarqube-token"
+              description: "SonarQube Authentication Token"
+              secret: "${SONARQUBE_TOKEN}"
+              
+          # Slack Token
+          - string:
+              scope: GLOBAL
+              id: "slack-token"
+              description: "Slack Bot Token"
+              secret: "${SLACK_BOT_TOKEN}"
+
+# Global Pipeline Libraries
+unclassified:
+  globalLibraries:
+    libraries:
+      - name: "shared-library"
+        defaultVersion: "main"
+        implicit: false
+        allowVersionOverride: true
+        includeInChangesets: true
+        retriever:
+          modernSCM:
+            scm:
+              git:
+                remote: "https://github.com/company/jenkins-shared-library.git"
+                credentialsId: "git-ssh-key"
+                traits:
+                  - gitBranchDiscovery
+  
+  # Location Configuration
+  location:
+    adminAddress: "jenkins-admin@company.com"
+    url: "https://jenkins.company.com"
+  
+  # Email Configuration
+  mailer:
+    smtpHost: "smtp.company.com"
+    smtpPort: "587"
+    useSsl: true
+    charset: "UTF-8"
+    
+  # Slack Configuration
+  slackNotifier:
+    teamDomain: "company"
+    tokenCredentialId: "slack-token"
+    botUser: true
+    
+  # SonarQube Configuration
+  sonarglobalconfiguration:
+    installations:
+      - name: "SonarQube"
+        serverUrl: "https://sonar.company.com"
+        credentialsId: "sonarqube-token"
+        
+  # Artifactory Configuration  
+  artifactory:
+    servers:
+      - serverId: "artifactory"
+        url: "https://artifactory.company.com/artifactory"
+        credentialsId: "docker-registry"
+        timeout: 300
+        
+  # Prometheus Metrics
+  prometheusConfiguration:
+    collectingMetricsPeriodInSeconds: 120
+    defaultNamespace: "jenkins"
+    path: "/prometheus"
+    
+  # HashiCorp Vault
+  hashicorpVault:
+    vaultUrl: "https://vault.company.com"
+    vaultCredentialId: "vault-token"
+    engineVersion: 2
+    skipSslVerification: false
+    timeout: 60
+
+# Job DSL Seed Jobs
+jobs:
+  - script: |
+      folder('Applications') {
+        displayName('Application Pipelines')
+        description('Multibranch pipelines for applications')
+      }
+      
+      folder('Infrastructure') {
+        displayName('Infrastructure Pipelines')
+        description('Infrastructure as Code pipelines')
+      }
+      
+      multibranchPipelineJob('Applications/microservice-1') {
+        branchSources {
+          git {
+            id('microservice-1')
+            remote('https://github.com/company/microservice-1.git')
+            credentialsId('git-ssh-key')
+          }
+        }
+        
+        orphanedItemStrategy {
+          discardOldItems {
+            numToKeep(10)
+          }
+        }
+        
+        triggers {
+          periodicFolderTrigger {
+            interval('5m')
+          }
+        }
+      }
+
+# Tool Installations
+tool:
+  git:
+    installations:
+      - name: "Default"
+        home: "git"
+        
+  maven:
+    installations:
+      - name: "Maven 3.8"
+        properties:
+          - installSource:
+              installers:
+                - maven:
+                    id: "3.8.6"
+                    
+  jdk:
+    installations:
+      - name: "JDK 11"
+        properties:
+          - installSource:
+              installers:
+                - adoptOpenJdkInstaller:
+                    id: "jdk-11.0.12+7"

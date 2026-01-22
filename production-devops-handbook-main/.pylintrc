@@ -1,0 +1,7 @@
+[MASTER]
+# Ignore import errors for optional dependencies
+ignored-modules=kfp,fastapi,pydantic,torch,transformers,prometheus_client,evidently,langchain,pinecone,mlflow
+
+[MESSAGES CONTROL]
+# Disable import errors for external packages
+disable=import-error,no-name-in-module

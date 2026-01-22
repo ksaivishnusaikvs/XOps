@@ -1,0 +1,368 @@
+# Argo Rollouts - Progressive Delivery with Canary Strategy
+
+apiVersion: argoproj.io/v1alpha1
+kind: Rollout
+metadata:
+  name: microservice-rollout
+  namespace: production
+  labels:
+    app: microservice
+    version: v2.0.0
+spec:
+  replicas: 10
+  revisionHistoryLimit: 5
+  
+  selector:
+    matchLabels:
+      app: microservice
+  
+  template:
+    metadata:
+      labels:
+        app: microservice
+        version: v2.0.0
+    spec:
+      containers:
+      - name: microservice
+        image: ghcr.io/org/microservice:v2.0.0
+        ports:
+        - containerPort: 8080
+          protocol: TCP
+        resources:
+          limits:
+            cpu: 500m
+            memory: 512Mi
+          requests:
+            cpu: 100m
+            memory: 128Mi
+        livenessProbe:
+          httpGet:
+            path: /health/live
+            port: 8080
+          initialDelaySeconds: 30
+          periodSeconds: 10
+        readinessProbe:
+          httpGet:
+            path: /health/ready
+            port: 8080
+          initialDelaySeconds: 10
+          periodSeconds: 5
+  
+  strategy:
+    canary:
+      # Traffic management via service mesh or ingress
+      canaryService: microservice-canary
+      stableService: microservice-stable
+      
+      # Canary steps - progressive rollout
+      steps:
+        # Step 1: Deploy canary with 10% traffic
+        - setWeight: 10
+        - pause:
+            duration: 5m
+        
+        # Step 2: Analysis for 5 minutes
+        - analysis:
+            templates:
+              - templateName: success-rate
+              - templateName: latency
+            args:
+              - name: service-name
+                value: microservice-canary
+        
+        # Step 3: Increase to 25% traffic
+        - setWeight: 25
+        - pause:
+            duration: 10m
+        
+        # Step 4: Another analysis
+        - analysis:
+            templates:
+              - templateName: success-rate
+              - templateName: latency
+        
+        # Step 5: Increase to 50% traffic
+        - setWeight: 50
+        - pause:
+            duration: 10m
+        
+        # Step 6: Final analysis before full rollout
+        - analysis:
+            templates:
+              - templateName: success-rate
+              - templateName: latency
+              - templateName: error-rate
+        
+        # Step 7: Full rollout (100%)
+        - setWeight: 100
+      
+      # Traffic routing (Istio)
+      trafficRouting:
+        istio:
+          virtualService:
+            name: microservice-vsvc
+            routes:
+              - primary
+      
+      # Analysis configuration
+      analysis:
+        templates:
+          - templateName: success-rate
+          - templateName: latency
+        
+        # Analysis run arguments
+        args:
+          - name: service-name
+            value: microservice-canary
+          - name: prometheus-url
+            value: http://prometheus.monitoring:9090
+      
+      # Automatic rollback on failure
+      abortScaleDownDelaySeconds: 30
+      
+      # Max time for canary
+      progressDeadlineSeconds: 3600  # 1 hour
+
+---
+# AnalysisTemplate: Success Rate
+apiVersion: argoproj.io/v1alpha1
+kind: AnalysisTemplate
+metadata:
+  name: success-rate
+  namespace: production
+spec:
+  args:
+    - name: service-name
+    - name: prometheus-url
+      value: http://prometheus.monitoring:9090
+  
+  metrics:
+    - name: success-rate
+      interval: 1m
+      count: 5
+      successCondition: result[0] >= 0.99
+      failureLimit: 2
+      provider:
+        prometheus:
+          address: "{{args.prometheus-url}}"
+          query: |
+            sum(rate(
+              http_requests_total{
+                service="{{args.service-name}}",
+                status=~"2.."
+              }[5m]
+            ))
+            /
+            sum(rate(
+              http_requests_total{
+                service="{{args.service-name}}"
+              }[5m]
+            ))
+
+---
+# AnalysisTemplate: Latency (P95)
+apiVersion: argoproj.io/v1alpha1
+kind: AnalysisTemplate
+metadata:
+  name: latency
+  namespace: production
+spec:
+  args:
+    - name: service-name
+    - name: prometheus-url
+      value: http://prometheus.monitoring:9090
+  
+  metrics:
+    - name: p95-latency
+      interval: 1m
+      count: 5
+      successCondition: result[0] <= 500  # 500ms
+      failureLimit: 3
+      provider:
+        prometheus:
+          address: "{{args.prometheus-url}}"
+          query: |
+            histogram_quantile(0.95,
+              sum(rate(
+                http_request_duration_seconds_bucket{
+                  service="{{args.service-name}}"
+                }[5m]
+              )) by (le)
+            ) * 1000
+
+---
+# AnalysisTemplate: Error Rate
+apiVersion: argoproj.io/v1alpha1
+kind: AnalysisTemplate
+metadata:
+  name: error-rate
+  namespace: production
+spec:
+  args:
+    - name: service-name
+    - name: prometheus-url
+      value: http://prometheus.monitoring:9090
+  
+  metrics:
+    - name: error-rate
+      interval: 1m
+      count: 5
+      successCondition: result[0] <= 0.01  # 1% error rate
+      failureLimit: 1
+      provider:
+        prometheus:
+          address: "{{args.prometheus-url}}"
+          query: |
+            sum(rate(
+              http_requests_total{
+                service="{{args.service-name}}",
+                status=~"5.."
+              }[5m]
+            ))
+            /
+            sum(rate(
+              http_requests_total{
+                service="{{args.service-name}}"
+              }[5m]
+            ))
+
+---
+# Blue/Green Deployment Strategy
+apiVersion: argoproj.io/v1alpha1
+kind: Rollout
+metadata:
+  name: microservice-bluegreen
+  namespace: production
+spec:
+  replicas: 10
+  
+  selector:
+    matchLabels:
+      app: microservice
+  
+  template:
+    metadata:
+      labels:
+        app: microservice
+    spec:
+      containers:
+      - name: microservice
+        image: ghcr.io/org/microservice:v2.0.0
+        ports:
+        - containerPort: 8080
+  
+  strategy:
+    blueGreen:
+      # Service name for active (blue) deployment
+      activeService: microservice-active
+      
+      # Service name for preview (green) deployment
+      previewService: microservice-preview
+      
+      # Auto promotion after tests pass
+      autoPromotionEnabled: false
+      
+      # Manual approval required
+      autoPromotionSeconds: 0
+      
+      # Scale down old version after promotion
+      scaleDownDelaySeconds: 300  # 5 minutes
+      
+      # Keep old version for rollback
+      scaleDownDelayRevisionLimit: 1
+      
+      # Preview replicas
+      previewReplicaCount: 3
+      
+      # Analysis before promotion
+      prePromotionAnalysis:
+        templates:
+          - templateName: smoke-tests
+        args:
+          - name: service-name
+            value: microservice-preview
+
+---
+# Analysis for Blue/Green smoke tests
+apiVersion: argoproj.io/v1alpha1
+kind: AnalysisTemplate
+metadata:
+  name: smoke-tests
+  namespace: production
+spec:
+  args:
+    - name: service-name
+  
+  metrics:
+    - name: smoke-test
+      count: 1
+      provider:
+        job:
+          spec:
+            backoffLimit: 1
+            template:
+              spec:
+                containers:
+                - name: smoke-test
+                  image: curlimages/curl:latest
+                  command:
+                    - sh
+                    - -c
+                    - |
+                      # Test health endpoint
+                      curl -f http://{{args.service-name}}:80/health/ready
+                      
+                      # Test API endpoint
+                      curl -f http://{{args.service-name}}:80/api/v1/status
+                      
+                      echo "Smoke tests passed"
+                restartPolicy: Never
+
+---
+# Services for Canary
+apiVersion: v1
+kind: Service
+metadata:
+  name: microservice-stable
+  namespace: production
+spec:
+  selector:
+    app: microservice
+  ports:
+    - protocol: TCP
+      port: 80
+      targetPort: 8080
+
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: microservice-canary
+  namespace: production
+spec:
+  selector:
+    app: microservice
+  ports:
+    - protocol: TCP
+      port: 80
+      targetPort: 8080
+
+---
+# Istio VirtualService for traffic splitting
+apiVersion: networking.istio.io/v1beta1
+kind: VirtualService
+metadata:
+  name: microservice-vsvc
+  namespace: production
+spec:
+  hosts:
+    - microservice
+  http:
+    - name: primary
+      route:
+        - destination:
+            host: microservice-stable
+          weight: 100
+        - destination:
+            host: microservice-canary
+          weight: 0

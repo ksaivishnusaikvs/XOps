@@ -1,0 +1,485 @@
+# Self-Hosted Runner on Kubernetes with Actions Runner Controller
+# Deploy scalable, auto-scaling GitHub Actions runners in Kubernetes
+# Platform: Kubernetes (EKS, GKE, AKS)
+
+---
+# Namespace for GitHub Actions Runners
+apiVersion: v1
+kind: Namespace
+metadata:
+  name: github-actions-runners
+  labels:
+    name: github-actions-runners
+    cost-center: platform-engineering
+
+---
+# Actions Runner Controller - Helm values
+# Install with: helm install actions-runner-controller actions-runner-controller/actions-runner-controller \
+#   --namespace github-actions-runners --create-namespace -f actions-runner-controller-values.yaml
+
+# values.yaml content:
+# authSecret:
+#   create: true
+#   github_app_id: "YOUR_APP_ID"
+#   github_app_installation_id: "YOUR_INSTALLATION_ID"
+#   github_app_private_key: |
+#     -----BEGIN RSA PRIVATE KEY-----
+#     YOUR_PRIVATE_KEY
+#     -----END RSA PRIVATE KEY-----
+
+---
+# Runner Deployment for General Purpose Workloads
+apiVersion: actions.summerwind.dev/v1alpha1
+kind: RunnerDeployment
+metadata:
+  name: general-purpose-runners
+  namespace: github-actions-runners
+spec:
+  replicas: 5
+  template:
+    metadata:
+      labels:
+        runner-type: general-purpose
+        cost-center: platform-engineering
+    spec:
+      organization: YOUR_GITHUB_ORG  # or repository: YOUR_ORG/YOUR_REPO
+      labels:
+        - self-hosted
+        - linux
+        - x64
+        - general-purpose
+      resources:
+        requests:
+          cpu: "1"
+          memory: "2Gi"
+        limits:
+          cpu: "2"
+          memory: "4Gi"
+      ephemeral: true  # Destroy runner after each job
+      dockerEnabled: true
+      dockerdWithinRunnerContainer: true
+      image: summerwind/actions-runner:latest
+      imagePullPolicy: IfNotPresent
+      env:
+        - name: DOCKER_ENABLED
+          value: "true"
+        - name: RUNNER_WORKDIR
+          value: /tmp/runner
+      volumeMounts:
+        - name: work
+          mountPath: /tmp/runner
+      volumes:
+        - name: work
+          emptyDir: {}
+      nodeSelector:
+        workload-type: ci-cd
+      tolerations:
+        - key: "ci-cd"
+          operator: "Equal"
+          value: "true"
+          effect: "NoSchedule"
+
+---
+# Horizontal Pod Autoscaler for General Purpose Runners
+apiVersion: actions.summerwind.dev/v1alpha1
+kind: HorizontalRunnerAutoscaler
+metadata:
+  name: general-purpose-runners-autoscaler
+  namespace: github-actions-runners
+spec:
+  scaleTargetRef:
+    name: general-purpose-runners
+  minReplicas: 5
+  maxReplicas: 30
+  metrics:
+    - type: PercentageRunnersBusy
+      scaleUpThreshold: '0.75'
+      scaleDownThreshold: '0.25'
+      scaleUpFactor: '2'
+      scaleDownFactor: '0.5'
+  scaleUpTriggers:
+    - githubEvent:
+        workflowJob: {}
+      amount: 1
+      duration: "5m"
+
+---
+# Runner Deployment for GPU Workloads (ML/AI)
+apiVersion: actions.summerwind.dev/v1alpha1
+kind: RunnerDeployment
+metadata:
+  name: gpu-runners
+  namespace: github-actions-runners
+spec:
+  replicas: 2
+  template:
+    metadata:
+      labels:
+        runner-type: gpu
+        cost-center: machine-learning
+    spec:
+      organization: YOUR_GITHUB_ORG
+      labels:
+        - self-hosted
+        - linux
+        - x64
+        - gpu
+        - nvidia
+      resources:
+        requests:
+          cpu: "4"
+          memory: "16Gi"
+          nvidia.com/gpu: "1"
+        limits:
+          cpu: "8"
+          memory: "32Gi"
+          nvidia.com/gpu: "1"
+      ephemeral: true
+      dockerEnabled: true
+      image: summerwind/actions-runner:latest
+      env:
+        - name: DOCKER_ENABLED
+          value: "true"
+        - name: NVIDIA_VISIBLE_DEVICES
+          value: "all"
+        - name: NVIDIA_DRIVER_CAPABILITIES
+          value: "compute,utility"
+      nodeSelector:
+        accelerator: nvidia-tesla-t4
+        workload-type: ml
+      tolerations:
+        - key: "nvidia.com/gpu"
+          operator: "Exists"
+          effect: "NoSchedule"
+
+---
+# HPA for GPU Runners
+apiVersion: actions.summerwind.dev/v1alpha1
+kind: HorizontalRunnerAutoscaler
+metadata:
+  name: gpu-runners-autoscaler
+  namespace: github-actions-runners
+spec:
+  scaleTargetRef:
+    name: gpu-runners
+  minReplicas: 2
+  maxReplicas: 10
+  metrics:
+    - type: PercentageRunnersBusy
+      scaleUpThreshold: '0.80'
+      scaleDownThreshold: '0.20'
+      scaleUpFactor: '1.5'
+      scaleDownFactor: '0.5'
+
+---
+# Runner Deployment for Large Memory Workloads
+apiVersion: actions.summerwind.dev/v1alpha1
+kind: RunnerDeployment
+metadata:
+  name: large-memory-runners
+  namespace: github-actions-runners
+spec:
+  replicas: 2
+  template:
+    metadata:
+      labels:
+        runner-type: large-memory
+        cost-center: platform-engineering
+    spec:
+      organization: YOUR_GITHUB_ORG
+      labels:
+        - self-hosted
+        - linux
+        - x64
+        - large-memory
+      resources:
+        requests:
+          cpu: "4"
+          memory: "32Gi"
+        limits:
+          cpu: "8"
+          memory: "64Gi"
+      ephemeral: true
+      dockerEnabled: true
+      image: summerwind/actions-runner:latest
+      nodeSelector:
+        node.kubernetes.io/instance-type: r5.2xlarge
+      tolerations:
+        - key: "high-memory"
+          operator: "Equal"
+          value: "true"
+          effect: "NoSchedule"
+
+---
+# HPA for Large Memory Runners
+apiVersion: actions.summerwind.dev/v1alpha1
+kind: HorizontalRunnerAutoscaler
+metadata:
+  name: large-memory-runners-autoscaler
+  namespace: github-actions-runners
+spec:
+  scaleTargetRef:
+    name: large-memory-runners
+  minReplicas: 2
+  maxReplicas: 8
+  metrics:
+    - type: PercentageRunnersBusy
+      scaleUpThreshold: '0.70'
+      scaleDownThreshold: '0.30'
+
+---
+# Runner Deployment for Windows Workloads
+apiVersion: actions.summerwind.dev/v1alpha1
+kind: RunnerDeployment
+metadata:
+  name: windows-runners
+  namespace: github-actions-runners
+spec:
+  replicas: 3
+  template:
+    metadata:
+      labels:
+        runner-type: windows
+        cost-center: platform-engineering
+    spec:
+      organization: YOUR_GITHUB_ORG
+      labels:
+        - self-hosted
+        - windows
+        - x64
+      resources:
+        requests:
+          cpu: "2"
+          memory: "8Gi"
+        limits:
+          cpu: "4"
+          memory: "16Gi"
+      ephemeral: true
+      image: summerwind/actions-runner:windows-latest
+      nodeSelector:
+        kubernetes.io/os: windows
+
+---
+# ConfigMap for Runner Configuration
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: runner-config
+  namespace: github-actions-runners
+data:
+  runner.env: |
+    RUNNER_FEATURE_FLAG_EPHEMERAL=true
+    DISABLE_RUNNER_UPDATE=false
+    RUNNER_ALLOW_RUNASROOT=true
+  cleanup.sh: |
+    #!/bin/bash
+    # Cleanup script to run after each job
+    docker system prune -af --volumes
+    rm -rf /tmp/runner/*
+
+---
+# ServiceAccount for Runners with permissions
+apiVersion: v1
+kind: ServiceAccount
+metadata:
+  name: actions-runner
+  namespace: github-actions-runners
+
+---
+# Role for runners to manage pods (for Docker-in-Docker scenarios)
+apiVersion: rbac.authorization.k8s.io/v1
+kind: Role
+metadata:
+  name: actions-runner-role
+  namespace: github-actions-runners
+rules:
+  - apiGroups: [""]
+    resources: ["pods", "pods/log"]
+    verbs: ["get", "list", "create", "delete"]
+  - apiGroups: [""]
+    resources: ["secrets"]
+    verbs: ["get", "list"]
+
+---
+# RoleBinding
+apiVersion: rbac.authorization.k8s.io/v1
+kind: RoleBinding
+metadata:
+  name: actions-runner-rolebinding
+  namespace: github-actions-runners
+subjects:
+  - kind: ServiceAccount
+    name: actions-runner
+    namespace: github-actions-runners
+roleRef:
+  kind: Role
+  name: actions-runner-role
+  apiGroup: rbac.authorization.k8s.io
+
+---
+# PodDisruptionBudget to ensure availability during node maintenance
+apiVersion: policy/v1
+kind: PodDisruptionBudget
+metadata:
+  name: runner-pdb
+  namespace: github-actions-runners
+spec:
+  minAvailable: 3
+  selector:
+    matchLabels:
+      runner-type: general-purpose
+
+---
+# NetworkPolicy to restrict runner network access
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: runner-network-policy
+  namespace: github-actions-runners
+spec:
+  podSelector:
+    matchLabels:
+      app: actions-runner
+  policyTypes:
+    - Egress
+    - Ingress
+  egress:
+    # Allow DNS
+    - to:
+        - namespaceSelector:
+            matchLabels:
+              name: kube-system
+      ports:
+        - protocol: UDP
+          port: 53
+    # Allow HTTPS to GitHub
+    - to:
+        - podSelector: {}
+      ports:
+        - protocol: TCP
+          port: 443
+    # Allow Docker registry
+    - to:
+        - podSelector: {}
+      ports:
+        - protocol: TCP
+          port: 5000
+  ingress:
+    # No ingress required for runners
+
+---
+# Monitoring: ServiceMonitor for Prometheus
+apiVersion: monitoring.coreos.com/v1
+kind: ServiceMonitor
+metadata:
+  name: actions-runner-monitor
+  namespace: github-actions-runners
+  labels:
+    app: actions-runner
+spec:
+  selector:
+    matchLabels:
+      app: actions-runner-controller
+  endpoints:
+    - port: metrics
+      interval: 30s
+      path: /metrics
+
+---
+# Cost Allocation Labels for Kubecost
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: cost-allocation
+  namespace: github-actions-runners
+  labels:
+    kubecost.io/allocation: "true"
+data:
+  labels: |
+    cost-center=platform-engineering
+    team=devops
+    environment=production
+    application=github-actions
+
+---
+# Installation Instructions ConfigMap
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: installation-instructions
+  namespace: github-actions-runners
+data:
+  README.md: |
+    # GitHub Actions Runner Controller Setup
+    
+    ## Prerequisites
+    1. Kubernetes cluster (EKS, GKE, or AKS)
+    2. Helm 3.x installed
+    3. GitHub App created with Actions permissions
+    
+    ## Installation Steps
+    
+    ### 1. Install cert-manager (required)
+    ```bash
+    kubectl apply -f https://github.com/cert-manager/cert-manager/releases/download/v1.13.0/cert-manager.yaml
+    ```
+    
+    ### 2. Install Actions Runner Controller
+    ```bash
+    helm repo add actions-runner-controller https://actions-runner-controller.github.io/actions-runner-controller
+    helm repo update
+    
+    helm install actions-runner-controller actions-runner-controller/actions-runner-controller \
+      --namespace github-actions-runners \
+      --create-namespace \
+      --set authSecret.create=true \
+      --set authSecret.github_app_id=YOUR_APP_ID \
+      --set authSecret.github_app_installation_id=YOUR_INSTALLATION_ID \
+      --set authSecret.github_app_private_key="$(cat private-key.pem)"
+    ```
+    
+    ### 3. Deploy Runners
+    ```bash
+    kubectl apply -f actions-runner-controller.yaml
+    ```
+    
+    ### 4. Verify Installation
+    ```bash
+    kubectl get runners -n github-actions-runners
+    kubectl get pods -n github-actions-runners
+    ```
+    
+    ## Scaling Configuration
+    
+    Runners auto-scale based on workflow queue depth:
+    - Min replicas: 5 (general), 2 (GPU), 2 (large-memory)
+    - Max replicas: 30 (general), 10 (GPU), 8 (large-memory)
+    - Scale up threshold: 75% busy
+    - Scale down threshold: 25% busy
+    
+    ## Cost Optimization
+    
+    1. Use ephemeral runners (enabled by default)
+    2. Deploy on spot/preemptible instances
+    3. Set appropriate resource requests/limits
+    4. Monitor with Kubecost
+    
+    ## Monitoring
+    
+    Metrics exposed on port 8080:
+    - runner_busy_count
+    - runner_idle_count
+    - runner_queue_depth
+    - workflow_job_duration
+    
+    ## Troubleshooting
+    
+    Check runner logs:
+    ```bash
+    kubectl logs -n github-actions-runners -l app=actions-runner --tail=100
+    ```
+    
+    Check controller logs:
+    ```bash
+    kubectl logs -n github-actions-runners -l app.kubernetes.io/name=actions-runner-controller
+    ```

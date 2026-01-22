@@ -1,0 +1,103 @@
+# Kustomize Production Overlay
+# Production-specific configurations
+
+apiVersion: kustomize.config.k8s.io/v1beta1
+kind: Kustomization
+
+namespace: production
+
+bases:
+  - ../base
+
+# Production-specific labels
+commonLabels:
+  environment: production
+
+# Override image tag for production
+images:
+  - name: myapp
+    newName: myregistry/myapp
+    newTag: v1.2.3
+
+# Production replicas and resources
+replicas:
+  - name: myapp
+    count: 5
+
+# Production-specific patches
+patches:
+  # Increase resources for production
+  - patch: |-
+      apiVersion: apps/v1
+      kind: Deployment
+      metadata:
+        name: myapp
+      spec:
+        template:
+          spec:
+            containers:
+              - name: app
+                resources:
+                  requests:
+                    memory: "512Mi"
+                    cpu: "500m"
+                  limits:
+                    memory: "1Gi"
+                    cpu: "1000m"
+    target:
+      kind: Deployment
+  
+  # Add HPA for production
+  - patch: |-
+      apiVersion: autoscaling/v2
+      kind: HorizontalPodAutoscaler
+      metadata:
+        name: myapp
+      spec:
+        minReplicas: 5
+        maxReplicas: 20
+        metrics:
+          - type: Resource
+            resource:
+              name: cpu
+              target:
+                type: Utilization
+                averageUtilization: 70
+
+# Additional production resources
+resources:
+  - hpa.yaml
+  - pdb.yaml
+  - network-policy.yaml
+  - ingress.yaml
+
+# Production config overrides
+configMapGenerator:
+  - name: myapp-config
+    behavior: merge
+    literals:
+      - LOG_LEVEL=warn
+      - MAX_CONNECTIONS=500
+      - RATE_LIMIT=1000
+
+# Production-specific environment variables
+patchesStrategicMerge:
+  - |-
+    apiVersion: apps/v1
+    kind: Deployment
+    metadata:
+      name: myapp
+    spec:
+      template:
+        metadata:
+          annotations:
+            prometheus.io/scrape: "true"
+            prometheus.io/port: "9090"
+        spec:
+          containers:
+            - name: app
+              env:
+                - name: NODE_ENV
+                  value: production
+                - name: ENABLE_MONITORING
+                  value: "true"

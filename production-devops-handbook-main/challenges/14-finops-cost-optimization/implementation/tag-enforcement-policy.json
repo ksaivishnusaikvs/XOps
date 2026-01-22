@@ -1,0 +1,39 @@
+{
+  "Version": "2012-10-17",
+  "Statement": [
+    {
+      "Sid": "EnforceResourceTagging",
+      "Effect": "Deny",
+      "Action": [
+        "ec2:RunInstances",
+        "rds:CreateDBInstance",
+        "s3:CreateBucket",
+        "dynamodb:CreateTable",
+        "elasticloadbalancing:CreateLoadBalancer"
+      ],
+      "Resource": "*",
+      "Condition": {
+        "StringNotLike": {
+          "aws:RequestTag/Environment": ["production", "staging", "development", "test"],
+          "aws:RequestTag/Owner": "*",
+          "aws:RequestTag/CostCenter": "*",
+          "aws:RequestTag/Application": "*"
+        }
+      }
+    },
+    {
+      "Sid": "RequireEnvironmentTag",
+      "Effect": "Deny",
+      "Action": ["*"],
+      "Resource": "*",
+      "Condition": {
+        "StringNotEquals": {
+          "aws:RequestTag/Environment": ["production", "staging", "development", "test"]
+        },
+        "ForAllValues:StringNotLike": {
+          "aws:TagKeys": ["Environment"]
+        }
+      }
+    }
+  ]
+}

@@ -1,0 +1,565 @@
+{
+  "Version": "2012-10-17",
+  "Policies": {
+    
+    "DeveloperRolePolicy": {
+      "Version": "2012-10-17",
+      "Statement": [
+        {
+          "Sid": "ReadOnlyProduction",
+          "Effect": "Allow",
+          "Action": [
+            "ec2:Describe*",
+            "rds:Describe*",
+            "s3:Get*",
+            "s3:List*",
+            "cloudwatch:Describe*",
+            "cloudwatch:Get*",
+            "cloudwatch:List*",
+            "logs:Describe*",
+            "logs:Get*",
+            "logs:FilterLogEvents",
+            "dynamodb:Describe*",
+            "dynamodb:Get*",
+            "dynamodb:Query",
+            "dynamodb:Scan",
+            "lambda:Get*",
+            "lambda:List*"
+          ],
+          "Resource": "*",
+          "Condition": {
+            "StringEquals": {
+              "aws:RequestedRegion": ["us-east-1", "eu-west-1", "ap-southeast-1"]
+            }
+          }
+        },
+        {
+          "Sid": "FullDevelopmentAccess",
+          "Effect": "Allow",
+          "Action": [
+            "ec2:*",
+            "rds:*",
+            "s3:*",
+            "dynamodb:*",
+            "lambda:*",
+            "cloudformation:*"
+          ],
+          "Resource": "*",
+          "Condition": {
+            "StringEquals": {
+              "aws:ResourceTag/Environment": "development"
+            }
+          }
+        },
+        {
+          "Sid": "DenyProductionDestruction",
+          "Effect": "Deny",
+          "Action": [
+            "ec2:TerminateInstances",
+            "rds:DeleteDBInstance",
+            "s3:DeleteBucket",
+            "dynamodb:DeleteTable",
+            "lambda:DeleteFunction"
+          ],
+          "Resource": "*",
+          "Condition": {
+            "StringEquals": {
+              "aws:ResourceTag/Environment": "production"
+            }
+          }
+        }
+      ]
+    },
+
+    "EC2AdminRolePolicy": {
+      "Version": "2012-10-17",
+      "Statement": [
+        {
+          "Sid": "EC2FullAccess",
+          "Effect": "Allow",
+          "Action": "ec2:*",
+          "Resource": "*"
+        },
+        {
+          "Sid": "ELBFullAccess",
+          "Effect": "Allow",
+          "Action": "elasticloadbalancing:*",
+          "Resource": "*"
+        },
+        {
+          "Sid": "AutoScalingFullAccess",
+          "Effect": "Allow",
+          "Action": "autoscaling:*",
+          "Resource": "*"
+        },
+        {
+          "Sid": "CloudWatchAccess",
+          "Effect": "Allow",
+          "Action": [
+            "cloudwatch:PutMetricAlarm",
+            "cloudwatch:PutMetricData",
+            "cloudwatch:GetMetricStatistics",
+            "cloudwatch:ListMetrics"
+          ],
+          "Resource": "*"
+        },
+        {
+          "Sid": "RequireMFAForTermination",
+          "Effect": "Deny",
+          "Action": [
+            "ec2:TerminateInstances",
+            "ec2:DeleteVolume",
+            "ec2:DeleteSnapshot"
+          ],
+          "Resource": "*",
+          "Condition": {
+            "BoolIfExists": {
+              "aws:MultiFactorAuthPresent": "false"
+            }
+          }
+        }
+      ]
+    },
+
+    "RDSAdminRolePolicy": {
+      "Version": "2012-10-17",
+      "Statement": [
+        {
+          "Sid": "RDSFullAccess",
+          "Effect": "Allow",
+          "Action": "rds:*",
+          "Resource": "*"
+        },
+        {
+          "Sid": "RequireMFAForDeletion",
+          "Effect": "Deny",
+          "Action": [
+            "rds:DeleteDBInstance",
+            "rds:DeleteDBCluster",
+            "rds:DeleteDBSnapshot"
+          ],
+          "Resource": "*",
+          "Condition": {
+            "BoolIfExists": {
+              "aws:MultiFactorAuthPresent": "false"
+            }
+          }
+        },
+        {
+          "Sid": "RequireEncryption",
+          "Effect": "Deny",
+          "Action": "rds:CreateDBInstance",
+          "Resource": "*",
+          "Condition": {
+            "Bool": {
+              "rds:StorageEncrypted": "false"
+            }
+          }
+        }
+      ]
+    },
+
+    "S3AdminRolePolicy": {
+      "Version": "2012-10-17",
+      "Statement": [
+        {
+          "Sid": "S3FullAccess",
+          "Effect": "Allow",
+          "Action": "s3:*",
+          "Resource": "*"
+        },
+        {
+          "Sid": "DenyUnencryptedObjectUploads",
+          "Effect": "Deny",
+          "Action": "s3:PutObject",
+          "Resource": "*",
+          "Condition": {
+            "StringNotEquals": {
+              "s3:x-amz-server-side-encryption": [
+                "AES256",
+                "aws:kms"
+              ]
+            }
+          }
+        },
+        {
+          "Sid": "DenyPublicBuckets",
+          "Effect": "Deny",
+          "Action": [
+            "s3:PutBucketPublicAccessBlock",
+            "s3:PutBucketPolicy",
+            "s3:PutBucketAcl"
+          ],
+          "Resource": "*",
+          "Condition": {
+            "Bool": {
+              "s3:BlockPublicAcls": "false",
+              "s3:BlockPublicPolicy": "false",
+              "s3:IgnorePublicAcls": "false",
+              "s3:RestrictPublicBuckets": "false"
+            }
+          }
+        }
+      ]
+    },
+
+    "EC2InstanceRoleForS3Access": {
+      "Version": "2012-10-17",
+      "Statement": [
+        {
+          "Sid": "S3ReadWriteAccess",
+          "Effect": "Allow",
+          "Action": [
+            "s3:GetObject",
+            "s3:PutObject",
+            "s3:DeleteObject",
+            "s3:ListBucket"
+          ],
+          "Resource": [
+            "arn:aws:s3:::application-data-bucket/*",
+            "arn:aws:s3:::application-data-bucket"
+          ]
+        },
+        {
+          "Sid": "SecretsManagerAccess",
+          "Effect": "Allow",
+          "Action": [
+            "secretsmanager:GetSecretValue",
+            "secretsmanager:DescribeSecret"
+          ],
+          "Resource": "arn:aws:secretsmanager:*:*:secret:production/*"
+        },
+        {
+          "Sid": "CloudWatchMetrics",
+          "Effect": "Allow",
+          "Action": [
+            "cloudwatch:PutMetricData",
+            "cloudwatch:GetMetricStatistics"
+          ],
+          "Resource": "*"
+        },
+        {
+          "Sid": "CloudWatchLogs",
+          "Effect": "Allow",
+          "Action": [
+            "logs:CreateLogGroup",
+            "logs:CreateLogStream",
+            "logs:PutLogEvents",
+            "logs:DescribeLogStreams"
+          ],
+          "Resource": "arn:aws:logs:*:*:log-group:/aws/ec2/*"
+        }
+      ]
+    },
+
+    "LambdaExecutionRoleForCostOptimizer": {
+      "Version": "2012-10-17",
+      "Statement": [
+        {
+          "Sid": "EC2AccessForCostOptimization",
+          "Effect": "Allow",
+          "Action": [
+            "ec2:DescribeVolumes",
+            "ec2:DeleteVolume",
+            "ec2:CreateSnapshot",
+            "ec2:DescribeSnapshots",
+            "ec2:CreateTags",
+            "ec2:DescribeAddresses",
+            "ec2:ReleaseAddress",
+            "ec2:DescribeInstances"
+          ],
+          "Resource": "*"
+        },
+        {
+          "Sid": "CloudWatchAccess",
+          "Effect": "Allow",
+          "Action": [
+            "cloudwatch:GetMetricStatistics",
+            "cloudwatch:ListMetrics"
+          ],
+          "Resource": "*"
+        },
+        {
+          "Sid": "SNSPublish",
+          "Effect": "Allow",
+          "Action": "sns:Publish",
+          "Resource": "arn:aws:sns:*:*:cost-optimization-alerts"
+        },
+        {
+          "Sid": "CostExplorerAccess",
+          "Effect": "Allow",
+          "Action": [
+            "ce:GetCostAndUsage",
+            "ce:GetCostForecast"
+          ],
+          "Resource": "*"
+        },
+        {
+          "Sid": "CloudWatchLogsAccess",
+          "Effect": "Allow",
+          "Action": [
+            "logs:CreateLogGroup",
+            "logs:CreateLogStream",
+            "logs:PutLogEvents"
+          ],
+          "Resource": "arn:aws:logs:*:*:log-group:/aws/lambda/cost-optimizer:*"
+        }
+      ]
+    },
+
+    "SecurityAuditorRolePolicy": {
+      "Version": "2012-10-17",
+      "Statement": [
+        {
+          "Sid": "ReadOnlySecurityAccess",
+          "Effect": "Allow",
+          "Action": [
+            "iam:Get*",
+            "iam:List*",
+            "ec2:Describe*",
+            "rds:Describe*",
+            "s3:GetBucket*",
+            "s3:GetEncryption*",
+            "s3:GetAccountPublicAccessBlock",
+            "cloudtrail:LookupEvents",
+            "cloudtrail:GetTrailStatus",
+            "guardduty:Get*",
+            "guardduty:List*",
+            "securityhub:Get*",
+            "securityhub:List*",
+            "config:Describe*",
+            "config:Get*",
+            "config:List*"
+          ],
+          "Resource": "*"
+        },
+        {
+          "Sid": "AssumeRoleForCrossAccountAudit",
+          "Effect": "Allow",
+          "Action": "sts:AssumeRole",
+          "Resource": "arn:aws:iam::*:role/SecurityAuditorRole"
+        }
+      ]
+    },
+
+    "CI_CD_DeploymentRolePolicy": {
+      "Version": "2012-10-17",
+      "Statement": [
+        {
+          "Sid": "ECRAccess",
+          "Effect": "Allow",
+          "Action": [
+            "ecr:GetAuthorizationToken",
+            "ecr:BatchCheckLayerAvailability",
+            "ecr:GetDownloadUrlForLayer",
+            "ecr:BatchGetImage",
+            "ecr:PutImage",
+            "ecr:InitiateLayerUpload",
+            "ecr:UploadLayerPart",
+            "ecr:CompleteLayerUpload"
+          ],
+          "Resource": "*"
+        },
+        {
+          "Sid": "ECSDeployAccess",
+          "Effect": "Allow",
+          "Action": [
+            "ecs:UpdateService",
+            "ecs:DescribeServices",
+            "ecs:DescribeTaskDefinition",
+            "ecs:RegisterTaskDefinition"
+          ],
+          "Resource": "*"
+        },
+        {
+          "Sid": "S3ArtifactAccess",
+          "Effect": "Allow",
+          "Action": [
+            "s3:GetObject",
+            "s3:PutObject"
+          ],
+          "Resource": "arn:aws:s3:::ci-cd-artifacts/*"
+        },
+        {
+          "Sid": "PassRoleToECS",
+          "Effect": "Allow",
+          "Action": "iam:PassRole",
+          "Resource": [
+            "arn:aws:iam::*:role/ecsTaskExecutionRole",
+            "arn:aws:iam::*:role/ecsTaskRole"
+          ]
+        }
+      ]
+    },
+
+    "EnforceMFAPolicy": {
+      "Version": "2012-10-17",
+      "Statement": [
+        {
+          "Sid": "DenyAllWithoutMFA",
+          "Effect": "Deny",
+          "NotAction": [
+            "iam:CreateVirtualMFADevice",
+            "iam:EnableMFADevice",
+            "iam:GetUser",
+            "iam:ListMFADevices",
+            "iam:ListVirtualMFADevices",
+            "iam:ResyncMFADevice",
+            "sts:GetSessionToken"
+          ],
+          "Resource": "*",
+          "Condition": {
+            "BoolIfExists": {
+              "aws:MultiFactorAuthPresent": "false"
+            }
+          }
+        }
+      ]
+    },
+
+    "RestrictRegionPolicy": {
+      "Version": "2012-10-17",
+      "Statement": [
+        {
+          "Sid": "DenyAllOutsideApprovedRegions",
+          "Effect": "Deny",
+          "NotAction": [
+            "iam:*",
+            "organizations:*",
+            "route53:*",
+            "budgets:*",
+            "waf:*",
+            "cloudfront:*",
+            "support:*",
+            "trustedadvisor:*"
+          ],
+          "Resource": "*",
+          "Condition": {
+            "StringNotEquals": {
+              "aws:RequestedRegion": [
+                "us-east-1",
+                "eu-west-1",
+                "ap-southeast-1"
+              ]
+            }
+          }
+        }
+      ]
+    },
+
+    "RequireResourceTagsPolicy": {
+      "Version": "2012-10-17",
+      "Statement": [
+        {
+          "Sid": "DenyCreateWithoutRequiredTags",
+          "Effect": "Deny",
+          "Action": [
+            "ec2:RunInstances",
+            "ec2:CreateVolume",
+            "rds:CreateDBInstance",
+            "s3:CreateBucket"
+          ],
+          "Resource": "*",
+          "Condition": {
+            "StringNotLike": {
+              "aws:RequestTag/Environment": ["production", "staging", "development"],
+              "aws:RequestTag/CostCenter": "*",
+              "aws:RequestTag/Owner": "*",
+              "aws:RequestTag/Project": "*"
+            }
+          }
+        }
+      ]
+    }
+  },
+
+  "AssumeRolePolicies": {
+    
+    "EC2AssumeRolePolicy": {
+      "Version": "2012-10-17",
+      "Statement": [
+        {
+          "Effect": "Allow",
+          "Principal": {
+            "Service": "ec2.amazonaws.com"
+          },
+          "Action": "sts:AssumeRole"
+        }
+      ]
+    },
+
+    "LambdaAssumeRolePolicy": {
+      "Version": "2012-10-17",
+      "Statement": [
+        {
+          "Effect": "Allow",
+          "Principal": {
+            "Service": "lambda.amazonaws.com"
+          },
+          "Action": "sts:AssumeRole"
+        }
+      ]
+    },
+
+    "ECSTaskAssumeRolePolicy": {
+      "Version": "2012-10-17",
+      "Statement": [
+        {
+          "Effect": "Allow",
+          "Principal": {
+            "Service": "ecs-tasks.amazonaws.com"
+          },
+          "Action": "sts:AssumeRole"
+        }
+      ]
+    }
+  },
+
+  "S3BucketPolicies": {
+    
+    "SecureS3BucketPolicy": {
+      "Version": "2012-10-17",
+      "Statement": [
+        {
+          "Sid": "DenyInsecureConnections",
+          "Effect": "Deny",
+          "Principal": "*",
+          "Action": "s3:*",
+          "Resource": [
+            "arn:aws:s3:::BUCKET_NAME/*",
+            "arn:aws:s3:::BUCKET_NAME"
+          ],
+          "Condition": {
+            "Bool": {
+              "aws:SecureTransport": "false"
+            }
+          }
+        },
+        {
+          "Sid": "DenyUnencryptedObjectUploads",
+          "Effect": "Deny",
+          "Principal": "*",
+          "Action": "s3:PutObject",
+          "Resource": "arn:aws:s3:::BUCKET_NAME/*",
+          "Condition": {
+            "StringNotEquals": {
+              "s3:x-amz-server-side-encryption": [
+                "AES256",
+                "aws:kms"
+              ]
+            }
+          }
+        },
+        {
+          "Sid": "AllowCloudFrontAccess",
+          "Effect": "Allow",
+          "Principal": {
+            "AWS": "arn:aws:iam::cloudfront:user/CloudFront Origin Access Identity XXXXX"
+          },
+          "Action": "s3:GetObject",
+          "Resource": "arn:aws:s3:::BUCKET_NAME/*"
+        }
+      ]
+    }
+  }
+}

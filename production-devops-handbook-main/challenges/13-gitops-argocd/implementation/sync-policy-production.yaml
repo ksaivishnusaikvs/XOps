@@ -1,0 +1,407 @@
+# Production Sync Policy with Approval Gates
+# Manual sync with health checks and policy enforcement
+
+apiVersion: argoproj.io/v1alpha1
+kind: Application
+metadata:
+  name: production-microservice
+  namespace: argocd
+  annotations:
+    # Notifications
+    notifications.argoproj.io/subscribe.on-sync-succeeded.slack: prod-deployments
+    notifications.argoproj.io/subscribe.on-health-degraded.slack: prod-alerts
+    notifications.argoproj.io/subscribe.on-sync-failed.pagerduty: oncall
+    
+    # ArgoCD Image Updater (disabled for production)
+    argocd-image-updater.argoproj.io/image-list: ""
+    
+    # Documentation
+    link.argocd.argoproj.io/external-link: https://docs.example.com/apps/microservice
+  
+  finalizers:
+    - resources-finalizer.argocd.argoproj.io
+
+spec:
+  project: production
+  
+  source:
+    repoURL: https://github.com/org/gitops-config
+    targetRevision: release  # Production uses release branch
+    path: apps/microservice/overlays/production
+    
+    # Helm values
+    helm:
+      valueFiles:
+        - values-production.yaml
+      
+      parameters:
+        - name: image.tag
+          value: "v2.1.0"
+        - name: replicaCount
+          value: "10"
+        - name: resources.limits.cpu
+          value: "1000m"
+        - name: resources.limits.memory
+          value: "2Gi"
+  
+  destination:
+    server: https://aks-prod.example.com
+    namespace: production
+  
+  syncPolicy:
+    # NO AUTO-SYNC for production - manual approval required
+    automated: null
+    
+    syncOptions:
+      # Create namespace if it doesn't exist
+      - CreateNamespace=true
+      
+      # Validate resources before applying
+      - Validate=true
+      
+      # Prune resources in specific order
+      - PrunePropagationPolicy=foreground
+      - PruneLast=true
+      
+      # Respect ignore differences
+      - RespectIgnoreDifferences=true
+      
+      # Apply out of sync only
+      - ApplyOutOfSyncOnly=true
+      
+      # Server-side apply
+      - ServerSideApply=true
+    
+    retry:
+      limit: 3
+      backoff:
+        duration: 10s
+        factor: 2
+        maxDuration: 5m
+    
+    # Managed namespace metadata
+    managedNamespaceMetadata:
+      labels:
+        environment: production
+        managed-by: argocd
+      annotations:
+        cost-center: engineering
+  
+  # Ignore differences
+  ignoreDifferences:
+    # Ignore HPA changes to replicas
+    - group: apps
+      kind: Deployment
+      jsonPointers:
+        - /spec/replicas
+    
+    # Ignore cert-manager annotations
+    - group: ""
+      kind: Secret
+      name: tls-secret
+      jsonPointers:
+        - /metadata/annotations/cert-manager.io~1*
+  
+  # Resource tracking method
+  revisionHistoryLimit: 10
+  
+  # Health assessment
+  info:
+    - name: Last Deployed
+      value: '{{.status.operationState.finishedAt}}'
+    - name: Deployed By
+      value: '{{.status.operationState.operation.initiatedBy.username}}'
+
+---
+# AppProject for Production with RBAC
+apiVersion: argoproj.io/v1alpha1
+kind: AppProject
+metadata:
+  name: production
+  namespace: argocd
+  finalizers:
+    - resources-finalizer.argocd.argoproj.io
+spec:
+  description: Production applications with strict policies
+  
+  # Source repositories
+  sourceRepos:
+    - https://github.com/org/gitops-config
+    - https://github.com/org/helm-charts
+  
+  # Destination clusters and namespaces
+  destinations:
+    - namespace: 'production'
+      server: https://aks-prod.example.com
+    - namespace: 'prod-*'
+      server: https://aks-prod.example.com
+  
+  # Cluster resource allow list
+  clusterResourceWhitelist:
+    - group: ''
+      kind: Namespace
+    - group: rbac.authorization.k8s.io
+      kind: ClusterRole
+    - group: rbac.authorization.k8s.io
+      kind: ClusterRoleBinding
+  
+  # Namespace resource allow list
+  namespaceResourceWhitelist:
+    - group: ''
+      kind: ConfigMap
+    - group: ''
+      kind: Secret
+    - group: ''
+      kind: Service
+    - group: ''
+      kind: ServiceAccount
+    - group: apps
+      kind: Deployment
+    - group: apps
+      kind: StatefulSet
+    - group: apps
+      kind: DaemonSet
+    - group: batch
+      kind: Job
+    - group: batch
+      kind: CronJob
+    - group: networking.k8s.io
+      kind: Ingress
+    - group: networking.k8s.io
+      kind: NetworkPolicy
+    - group: autoscaling
+      kind: HorizontalPodAutoscaler
+    - group: policy
+      kind: PodDisruptionBudget
+    - group: argoproj.io
+      kind: Rollout
+  
+  # Deny certain resource kinds
+  namespaceResourceBlacklist:
+    - group: ''
+      kind: ResourceQuota  # Managed separately
+    - group: ''
+      kind: LimitRange    # Managed separately
+  
+  # OPA policy for validation
+  policyEnforcement:
+    - name: production-policy
+      policy: |
+        package production
+        
+        # Deny deployments without resource limits
+        deny[msg] {
+          input.request.object.kind == "Deployment"
+          not input.request.object.spec.template.spec.containers[_].resources.limits
+          msg = "All containers must have resource limits defined"
+        }
+        
+        # Require minimum replicas in production
+        deny[msg] {
+          input.request.object.kind == "Deployment"
+          input.request.object.spec.replicas < 3
+          msg = "Production deployments must have at least 3 replicas"
+        }
+        
+        # Require readiness probes
+        deny[msg] {
+          input.request.object.kind == "Deployment"
+          not input.request.object.spec.template.spec.containers[_].readinessProbe
+          msg = "All containers must have readiness probes"
+        }
+        
+        # Require liveness probes
+        deny[msg] {
+          input.request.object.kind == "Deployment"
+          not input.request.object.spec.template.spec.containers[_].livenessProbe
+          msg = "All containers must have liveness probes"
+        }
+        
+        # Enforce security context
+        deny[msg] {
+          input.request.object.kind == "Deployment"
+          container := input.request.object.spec.template.spec.containers[_]
+          not container.securityContext.runAsNonRoot
+          msg = "Containers must run as non-root user"
+        }
+        
+        # Require image from approved registry
+        deny[msg] {
+          input.request.object.kind == "Deployment"
+          container := input.request.object.spec.template.spec.containers[_]
+          not startswith(container.image, "ghcr.io/org/")
+          msg = "Images must come from approved registry: ghcr.io/org/"
+        }
+  
+  # Roles for RBAC
+  roles:
+    # Read-only role
+    - name: readonly
+      description: Read-only access to production applications
+      policies:
+        - p, proj:production:readonly, applications, get, production/*, allow
+      groups:
+        - developers
+    
+    # Deploy role (can sync but not delete)
+    - name: deployer
+      description: Can sync production applications
+      policies:
+        - p, proj:production:deployer, applications, get, production/*, allow
+        - p, proj:production:deployer, applications, sync, production/*, allow
+        - p, proj:production:deployer, applications, override, production/*, allow
+      groups:
+        - ops-team
+    
+    # Admin role
+    - name: admin
+      description: Full access to production applications
+      policies:
+        - p, proj:production:admin, applications, *, production/*, allow
+      groups:
+        - platform-team
+  
+  # Sync windows for maintenance
+  syncWindows:
+    # Allow syncs during business hours (UTC)
+    - kind: allow
+      schedule: '0 9-17 * * 1-5'  # Mon-Fri, 9am-5pm UTC
+      duration: 8h
+      applications:
+        - '*'
+      manualSync: true
+    
+    # Block automated syncs during weekend
+    - kind: deny
+      schedule: '0 0 * * 0,6'  # Sat-Sun
+      duration: 24h
+      applications:
+        - '*'
+      manualSync: false
+    
+    # Maintenance window (no deployments)
+    - kind: deny
+      schedule: '0 2 * * 0'  # Sunday 2am UTC
+      duration: 4h
+      applications:
+        - '*'
+      manualSync: true
+  
+  # Orphaned resources
+  orphanedResources:
+    warn: true
+    ignore:
+      - group: ''
+        kind: ConfigMap
+        name: kube-root-ca.crt
+
+---
+# Pre-Sync Hook: Policy Validation
+apiVersion: batch/v1
+kind: Job
+metadata:
+  name: pre-sync-validation
+  namespace: production
+  annotations:
+    argocd.argoproj.io/hook: PreSync
+    argocd.argoproj.io/hook-delete-policy: BeforeHookCreation
+spec:
+  template:
+    spec:
+      containers:
+      - name: validate
+        image: openpolicyagent/conftest:latest
+        command:
+          - sh
+          - -c
+          - |
+            echo "Running pre-sync policy validation..."
+            conftest test -p /policies /manifests
+            
+            echo "Checking resource quotas..."
+            kubectl get resourcequota -n production
+            
+            echo "Validation passed"
+      restartPolicy: Never
+  backoffLimit: 1
+
+---
+# Post-Sync Hook: Smoke Tests
+apiVersion: batch/v1
+kind: Job
+metadata:
+  name: post-sync-smoke-tests
+  namespace: production
+  annotations:
+    argocd.argoproj.io/hook: PostSync
+    argocd.argoproj.io/hook-delete-policy: BeforeHookCreation
+spec:
+  template:
+    spec:
+      containers:
+      - name: smoke-tests
+        image: curlimages/curl:latest
+        command:
+          - sh
+          - -c
+          - |
+            echo "Running post-sync smoke tests..."
+            
+            # Wait for service to be ready
+            sleep 30
+            
+            # Test health endpoint
+            if ! curl -f http://microservice:80/health/ready; then
+              echo "Health check failed"
+              exit 1
+            fi
+            
+            # Test API endpoint
+            if ! curl -f http://microservice:80/api/v1/status; then
+              echo "API check failed"
+              exit 1
+            fi
+            
+            echo "Smoke tests passed ✅"
+      restartPolicy: Never
+  backoffLimit: 2
+
+---
+# Sync Wave Example
+apiVersion: v1
+kind: Namespace
+metadata:
+  name: production
+  annotations:
+    argocd.argoproj.io/sync-wave: "-1"  # Create first
+
+---
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: app-config
+  namespace: production
+  annotations:
+    argocd.argoproj.io/sync-wave: "0"  # Create second
+
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: microservice
+  namespace: production
+  annotations:
+    argocd.argoproj.io/sync-wave: "1"  # Create last
+spec:
+  replicas: 10
+  selector:
+    matchLabels:
+      app: microservice
+  template:
+    metadata:
+      labels:
+        app: microservice
+    spec:
+      containers:
+      - name: app
+        image: ghcr.io/org/microservice:v2.1.0

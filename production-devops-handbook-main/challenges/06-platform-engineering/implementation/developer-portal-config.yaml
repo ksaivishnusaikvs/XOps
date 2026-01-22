@@ -1,0 +1,125 @@
+# Backstage Developer Portal Configuration
+# Complete configuration for internal developer platform
+
+app:
+  title: Developer Portal
+  baseUrl: http://localhost:3000
+
+organization:
+  name: My Organization
+
+backend:
+  baseUrl: http://localhost:7007
+  listen:
+    port: 7007
+  csp:
+    connect-src: ["'self'", 'http:', 'https:']
+  cors:
+    origin: http://localhost:3000
+    methods: [GET, POST, PUT, DELETE]
+    credentials: true
+  database:
+    client: pg
+    connection:
+      host: ${POSTGRES_HOST}
+      port: ${POSTGRES_PORT}
+      user: ${POSTGRES_USER}
+      password: ${POSTGRES_PASSWORD}
+  cache:
+    store: memory
+
+# Service catalog integration
+catalog:
+  import:
+    entityFilename: catalog-info.yaml
+  rules:
+    - allow: [Component, System, API, Resource, Location]
+  locations:
+    # Local example templates
+    - type: file
+      target: ./templates/service-template.yaml
+    
+    # GitHub integration
+    - type: url
+      target: https://github.com/my-org/*/blob/main/catalog-info.yaml
+      rules:
+        - allow: [Component, System, API]
+
+# Authentication
+auth:
+  providers:
+    github:
+      development:
+        clientId: ${GITHUB_CLIENT_ID}
+        clientSecret: ${GITHUB_CLIENT_SECRET}
+    google:
+      development:
+        clientId: ${GOOGLE_CLIENT_ID}
+        clientSecret: ${GOOGLE_CLIENT_SECRET}
+
+# Scaffolder (software templates)
+scaffolder:
+  defaultAuthor:
+    name: Platform Team
+    email: platform@myorg.com
+  defaultCommitMessage: 'Initial commit from Backstage'
+
+# TechDocs
+techdocs:
+  builder: 'local'
+  generator:
+    runIn: 'local'
+  publisher:
+    type: 'local'
+
+# Kubernetes integration
+kubernetes:
+  serviceLocatorMethod:
+    type: 'multiTenant'
+  clusterLocatorMethods:
+    - type: 'config'
+      clusters:
+        - url: ${K8S_CLUSTER_URL}
+          name: production
+          authProvider: 'serviceAccount'
+          skipTLSVerify: false
+          skipMetricsLookup: false
+
+# Integrations
+integrations:
+  github:
+    - host: github.com
+      token: ${GITHUB_TOKEN}
+  gitlab:
+    - host: gitlab.com
+      token: ${GITLAB_TOKEN}
+
+# Proxy endpoints
+proxy:
+  '/prometheus':
+    target: 'http://prometheus:9090'
+    pathRewrite:
+      '^/api/proxy/prometheus': '/'
+  '/grafana':
+    target: 'http://grafana:3000'
+    pathRewrite:
+      '^/api/proxy/grafana': '/'
+
+# Cost insights plugin
+costInsights:
+  engineerCost: 200000
+  products:
+    computeEngine:
+      name: Compute Engine
+      icon: compute
+    cloudStorage:
+      name: Cloud Storage
+      icon: storage
+
+# Search
+search:
+  pg:
+    highlightOptions:
+      useHighlight: true
+      maxWord: 35
+      minWord: 15

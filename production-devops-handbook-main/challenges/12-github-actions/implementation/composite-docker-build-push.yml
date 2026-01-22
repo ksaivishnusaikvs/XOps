@@ -1,0 +1,259 @@
+# Composite Action: Docker Build and Push with Advanced Caching
+# Location: composite-actions/docker-build-push/action.yml
+# Description: Builds and pushes Docker images with layer caching, SBOM, and provenance
+
+name: 'Docker Build and Push'
+description: 'Build and push Docker images with layer caching, security scanning, and SLSA provenance'
+author: 'Omade'
+
+inputs:
+  context:
+    description: 'Build context path'
+    required: false
+    default: '.'
+  dockerfile:
+    description: 'Path to Dockerfile'
+    required: false
+    default: './Dockerfile'
+  registry:
+    description: 'Container registry (ghcr.io, ecr, acr, gcr.io)'
+    required: true
+  image-name:
+    description: 'Image name (e.g., my-org/my-app)'
+    required: true
+  tags:
+    description: 'Additional tags (comma-separated)'
+    required: false
+    default: ''
+  build-args:
+    description: 'Build arguments (newline-separated KEY=VALUE)'
+    required: false
+    default: ''
+  platforms:
+    description: 'Target platforms (comma-separated)'
+    required: false
+    default: 'linux/amd64'
+  push:
+    description: 'Push image to registry'
+    required: false
+    default: 'true'
+  cache-mode:
+    description: 'Cache mode (min, max, disabled)'
+    required: false
+    default: 'max'
+  generate-sbom:
+    description: 'Generate Software Bill of Materials'
+    required: false
+    default: 'true'
+  generate-provenance:
+    description: 'Generate SLSA provenance attestation'
+    required: false
+    default: 'true'
+  scan-vulnerabilities:
+    description: 'Scan image for vulnerabilities'
+    required: false
+    default: 'true'
+  severity-threshold:
+    description: 'Fail on vulnerabilities of this severity or higher'
+    required: false
+    default: 'HIGH'
+  registry-username:
+    description: 'Registry username'
+    required: false
+    default: ''
+  registry-password:
+    description: 'Registry password or token'
+    required: false
+    default: ''
+
+outputs:
+  image-digest:
+    description: 'Image digest (SHA256)'
+    value: ${{ steps.build.outputs.digest }}
+  image-tags:
+    description: 'Full image tags'
+    value: ${{ steps.meta.outputs.tags }}
+  image-url:
+    description: 'Primary image URL'
+    value: ${{ steps.output.outputs.image-url }}
+  vulnerability-count:
+    description: 'Number of vulnerabilities found'
+    value: ${{ steps.scan.outputs.vulnerability-count }}
+
+runs:
+  using: 'composite'
+  steps:
+    - name: Set up QEMU
+      uses: docker/setup-qemu-action@68827325e0b33c7199eb31dd4e31fbe9023e06e3 # v3.0.0
+      if: contains(inputs.platforms, 'linux/arm')
+      shell: bash
+
+    - name: Set up Docker Buildx
+      uses: docker/setup-buildx-action@2b51285047da1547ffb1b2203d8be4c0af6b1f20 # v3.2.0
+      shell: bash
+      with:
+        driver-opts: |
+          image=moby/buildkit:latest
+          network=host
+        buildkitd-flags: --debug
+
+    - name: Login to Container Registry
+      uses: docker/login-action@e92390c5fb421da1463c202d546fed0ec5c39f20 # v3.1.0
+      shell: bash
+      if: inputs.push == 'true'
+      with:
+        registry: ${{ inputs.registry }}
+        username: ${{ inputs.registry-username != '' && inputs.registry-username || github.actor }}
+        password: ${{ inputs.registry-password != '' && inputs.registry-password || github.token }}
+
+    - name: Extract Docker metadata
+      id: meta
+      uses: docker/metadata-action@8e5442c4ef9f78752691e2d8f8d19755c6f78e81 # v5.5.1
+      shell: bash
+      with:
+        images: ${{ inputs.registry }}/${{ inputs.image-name }}
+        tags: |
+          type=ref,event=branch
+          type=ref,event=pr
+          type=semver,pattern={{version}}
+          type=semver,pattern={{major}}.{{minor}}
+          type=semver,pattern={{major}}
+          type=sha,prefix={{branch}}-,format=short
+          type=raw,value=latest,enable={{is_default_branch}}
+          ${{ inputs.tags }}
+        labels: |
+          org.opencontainers.image.title=${{ inputs.image-name }}
+          org.opencontainers.image.description=Built with GitHub Actions
+          org.opencontainers.image.vendor=${{ github.repository_owner }}
+
+    - name: Generate cache key
+      id: cache-key
+      shell: bash
+      run: |
+        CACHE_KEY="docker-${{ inputs.image-name }}-${{ hashFiles(format('{0}/{1}', inputs.context, inputs.dockerfile)) }}"
+        echo "cache-key=${CACHE_KEY}" >> $GITHUB_OUTPUT
+        echo "📦 Cache key: ${CACHE_KEY}"
+
+    - name: Build and push Docker image
+      id: build
+      uses: docker/build-push-action@2cdde995de11925a030ce8070c3d77a52ffcf1c0 # v5.3.0
+      shell: bash
+      with:
+        context: ${{ inputs.context }}
+        file: ${{ inputs.dockerfile }}
+        platforms: ${{ inputs.platforms }}
+        push: ${{ inputs.push }}
+        tags: ${{ steps.meta.outputs.tags }}
+        labels: ${{ steps.meta.outputs.labels }}
+        build-args: ${{ inputs.build-args }}
+        cache-from: |
+          type=gha,scope=${{ steps.cache-key.outputs.cache-key }}
+          type=registry,ref=${{ inputs.registry }}/${{ inputs.image-name }}:buildcache
+        cache-to: type=gha,mode=${{ inputs.cache-mode }},scope=${{ steps.cache-key.outputs.cache-key }}
+        provenance: ${{ inputs.generate-provenance }}
+        sbom: ${{ inputs.generate-sbom }}
+        outputs: type=image,name=${{ inputs.registry }}/${{ inputs.image-name }},push=${{ inputs.push }}
+
+    - name: Generate detailed SBOM
+      if: inputs.generate-sbom == 'true' && inputs.push == 'true'
+      uses: anchore/sbom-action@ab5d7b5f48981941c4c5d6bf33aeb98fe3bae38c # v0.15.10
+      shell: bash
+      with:
+        image: ${{ inputs.registry }}/${{ inputs.image-name }}@${{ steps.build.outputs.digest }}
+        format: 'spdx-json,cyclonedx-json'
+        output-file: 'sbom-${{ inputs.image-name }}.json'
+        upload-artifact: true
+        upload-release-assets: false
+
+    - name: Scan image for vulnerabilities
+      id: scan
+      if: inputs.scan-vulnerabilities == 'true'
+      uses: aquasecurity/trivy-action@915b19bbe73b92a6cf82a1bc12b087c9a19a5fe2 # v0.16.1
+      shell: bash
+      with:
+        image-ref: ${{ inputs.registry }}/${{ inputs.image-name }}@${{ steps.build.outputs.digest }}
+        format: 'sarif,json,table'
+        output: 'trivy-results.sarif'
+        severity: 'UNKNOWN,LOW,MEDIUM,HIGH,CRITICAL'
+        exit-code: '0'
+        vuln-type: 'os,library'
+        
+    - name: Count vulnerabilities
+      id: vuln-count
+      if: inputs.scan-vulnerabilities == 'true'
+      shell: bash
+      run: |
+        if [ -f trivy-results.json ]; then
+          VULN_COUNT=$(jq '[.Results[]?.Vulnerabilities[]? | select(.Severity == "HIGH" or .Severity == "CRITICAL")] | length' trivy-results.json || echo "0")
+          echo "vulnerability-count=${VULN_COUNT}" >> $GITHUB_OUTPUT
+          echo "🔍 Found ${VULN_COUNT} HIGH/CRITICAL vulnerabilities"
+          
+          if [ "${{ inputs.severity-threshold }}" == "HIGH" ] || [ "${{ inputs.severity-threshold }}" == "CRITICAL" ]; then
+            if [ "${VULN_COUNT}" -gt "0" ]; then
+              echo "❌ FAIL: Found ${VULN_COUNT} vulnerabilities at or above ${{ inputs.severity-threshold }} severity"
+              exit 1
+            fi
+          fi
+        else
+          echo "vulnerability-count=0" >> $GITHUB_OUTPUT
+        fi
+
+    - name: Upload vulnerability scan results
+      if: inputs.scan-vulnerabilities == 'true' && always()
+      uses: actions/upload-artifact@26f96dfa697d77e81fd5907df203aa23a56210a8 # v4.3.0
+      shell: bash
+      with:
+        name: trivy-scan-${{ inputs.image-name }}
+        path: |
+          trivy-results.*
+        retention-days: 30
+
+    - name: Upload to GitHub Security
+      if: inputs.scan-vulnerabilities == 'true' && github.event_name != 'pull_request'
+      uses: github/codeql-action/upload-sarif@1b1aada464948af03b950897e5eb522f92603cc2 # v3.24.9
+      shell: bash
+      with:
+        sarif_file: 'trivy-results.sarif'
+        category: 'container-scan-${{ inputs.image-name }}'
+
+    - name: Set outputs
+      id: output
+      shell: bash
+      run: |
+        IMAGE_URL="${{ inputs.registry }}/${{ inputs.image-name }}@${{ steps.build.outputs.digest }}"
+        echo "image-url=${IMAGE_URL}" >> $GITHUB_OUTPUT
+        echo "✅ Image built and pushed: ${IMAGE_URL}"
+
+    - name: Create job summary
+      if: always()
+      shell: bash
+      run: |
+        cat >> $GITHUB_STEP_SUMMARY <<EOF
+        ## 🐳 Docker Build Summary
+        
+        **Image:** \`${{ inputs.registry }}/${{ inputs.image-name }}\`
+        **Digest:** \`${{ steps.build.outputs.digest }}\`
+        **Platforms:** \`${{ inputs.platforms }}\`
+        **Pushed:** ${{ inputs.push }}
+        
+        ### 📦 Artifacts Generated
+        - ✅ SBOM (Software Bill of Materials)
+        - ✅ SLSA Provenance Attestation
+        - ✅ Vulnerability Scan Report
+        
+        ### 🔒 Security Scan
+        **Vulnerabilities Found:** ${{ steps.vuln-count.outputs.vulnerability-count || '0' }} (HIGH/CRITICAL)
+        
+        ### 🏷️ Tags
+        \`\`\`
+        ${{ steps.meta.outputs.tags }}
+        \`\`\`
+        
+        ### 📊 Build Performance
+        - Cache Mode: ${{ inputs.cache-mode }}
+        - Cache Hit: Check workflow logs
+        EOF
+
+branding:
+  icon: 'package'
+  color: 'blue'

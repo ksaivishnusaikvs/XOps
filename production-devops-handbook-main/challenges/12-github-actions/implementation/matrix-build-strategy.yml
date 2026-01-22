@@ -1,0 +1,324 @@
+# Matrix Build Strategy - Cross-Platform Testing
+# Tests application across multiple OS, language versions, and configurations
+# Location: .github/workflows/matrix-test.yml
+
+name: Matrix Build & Test
+
+on:
+  push:
+    branches: [main, develop, release/*]
+  pull_request:
+    branches: [main, develop]
+  schedule:
+    # Run nightly at 2 AM UTC
+    - cron: '0 2 * * *'
+
+# Cancel in-progress runs for the same workflow on the same ref
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+permissions:
+  contents: read
+  pull-requests: write
+
+jobs:
+  # Matrix strategy for comprehensive testing
+  test-matrix:
+    name: Test (${{ matrix.os }}, ${{ matrix.node-version }})
+    runs-on: ${{ matrix.os }}
+    timeout-minutes: 30
+    
+    strategy:
+      # Don't cancel all jobs if one fails
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, windows-latest, macos-latest]
+        node-version: [16, 18, 20]
+        include:
+          # Add additional test combinations
+          - os: ubuntu-latest
+            node-version: 20
+            experimental: true
+            coverage: true
+          # Windows specific configuration
+          - os: windows-latest
+            node-version: 18
+            use-windows-sdk: true
+          # macOS ARM64 testing
+          - os: macos-latest
+            node-version: 20
+            arch: arm64
+        exclude:
+          # Skip Node 16 on Windows (EOL support)
+          - os: windows-latest
+            node-version: 16
+
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@b4ffde65f46336ab88eb53be808477a3936bae11 # v4.1.1
+        with:
+          persist-credentials: false
+
+      - name: Setup Node.js ${{ matrix.node-version }}
+        uses: actions/setup-node@60edb5dd545a775178f52524783378180af0d1f8 # v4.0.2
+        with:
+          node-version: ${{ matrix.node-version }}
+          cache: 'npm'
+          cache-dependency-path: '**/package-lock.json'
+
+      - name: Install dependencies
+        run: npm ci --prefer-offline --no-audit
+
+      - name: Run linter
+        run: npm run lint
+        continue-on-error: ${{ matrix.experimental || false }}
+
+      - name: Run tests
+        run: npm test
+        env:
+          NODE_ENV: test
+          CI: true
+        continue-on-error: ${{ matrix.experimental || false }}
+
+      - name: Generate coverage report
+        if: matrix.coverage == true
+        run: npm run test:coverage
+
+      - name: Upload coverage to Codecov
+        if: matrix.coverage == true
+        uses: codecov/codecov-action@eaaf4bedf32dbdc6b720b63067d99c4d77d6047d # v3.1.4
+        with:
+          files: ./coverage/coverage-final.json
+          flags: ${{ matrix.os }}-node${{ matrix.node-version }}
+          name: ${{ matrix.os }}-${{ matrix.node-version }}
+          fail_ci_if_error: false
+
+      - name: Upload test results
+        if: always()
+        uses: actions/upload-artifact@26f96dfa697d77e81fd5907df203aa23a56210a8 # v4.3.0
+        with:
+          name: test-results-${{ matrix.os }}-${{ matrix.node-version }}
+          path: |
+            coverage/
+            test-results/
+          retention-days: 7
+
+  # Browser testing matrix
+  browser-tests:
+    name: Browser Tests (${{ matrix.browser }})
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    
+    strategy:
+      fail-fast: false
+      matrix:
+        browser: [chromium, firefox, webkit]
+        shard: [1, 2, 3]
+    
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@b4ffde65f46336ab88eb53be808477a3936bae11 # v4.1.1
+
+      - name: Setup Node.js
+        uses: actions/setup-node@60edb5dd545a775178f52524783378180af0d1f8 # v4.0.2
+        with:
+          node-version: '20'
+          cache: 'npm'
+
+      - name: Install dependencies
+        run: npm ci
+
+      - name: Install Playwright browsers
+        run: npx playwright install --with-deps ${{ matrix.browser }}
+
+      - name: Run Playwright tests
+        run: npx playwright test --project=${{ matrix.browser }} --shard=${{ matrix.shard }}/3
+        env:
+          CI: true
+
+      - name: Upload Playwright report
+        if: always()
+        uses: actions/upload-artifact@26f96dfa697d77e81fd5907df203aa23a56210a8 # v4.3.0
+        with:
+          name: playwright-report-${{ matrix.browser }}-shard-${{ matrix.shard }}
+          path: playwright-report/
+          retention-days: 14
+
+  # Docker multi-platform build
+  docker-multiplatform:
+    name: Docker Build (${{ matrix.platform }})
+    runs-on: ubuntu-latest
+    timeout-minutes: 45
+    
+    strategy:
+      fail-fast: false
+      matrix:
+        platform:
+          - linux/amd64
+          - linux/arm64
+          - linux/arm/v7
+    
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@b4ffde65f46336ab88eb53be808477a3936bae11 # v4.1.1
+
+      - name: Set up QEMU
+        uses: docker/setup-qemu-action@68827325e0b33c7199eb31dd4e31fbe9023e06e3 # v3.0.0
+
+      - name: Set up Docker Buildx
+        uses: docker/setup-buildx-action@2b51285047da1547ffb1b2203d8be4c0af6b1f20 # v3.2.0
+
+      - name: Extract platform name
+        id: platform
+        run: |
+          PLATFORM_NAME=$(echo "${{ matrix.platform }}" | sed 's/\//-/g')
+          echo "name=${PLATFORM_NAME}" >> $GITHUB_OUTPUT
+
+      - name: Build Docker image
+        uses: docker/build-push-action@2cdde995de11925a030ce8070c3d77a52ffcf1c0 # v5.3.0
+        with:
+          context: .
+          platforms: ${{ matrix.platform }}
+          push: false
+          tags: myapp:${{ steps.platform.outputs.name }}
+          cache-from: type=gha,scope=docker-${{ steps.platform.outputs.name }}
+          cache-to: type=gha,mode=max,scope=docker-${{ steps.platform.outputs.name }}
+
+  # Python version matrix
+  python-matrix:
+    name: Python ${{ matrix.python-version }} (${{ matrix.os }})
+    runs-on: ${{ matrix.os }}
+    timeout-minutes: 20
+    
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, macos-latest, windows-latest]
+        python-version: ['3.9', '3.10', '3.11', '3.12']
+    
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@b4ffde65f46336ab88eb53be808477a3936bae11 # v4.1.1
+
+      - name: Set up Python ${{ matrix.python-version }}
+        uses: actions/setup-python@0a5c61591373683505ea898e09a3ea4f39ef2b9c # v5.0.0
+        with:
+          python-version: ${{ matrix.python-version }}
+          cache: 'pip'
+
+      - name: Install dependencies
+        run: |
+          python -m pip install --upgrade pip
+          pip install -r requirements.txt
+          pip install pytest pytest-cov
+
+      - name: Run tests
+        run: pytest --cov=. --cov-report=xml --cov-report=html
+
+      - name: Upload coverage
+        uses: actions/upload-artifact@26f96dfa697d77e81fd5907df203aa23a56210a8 # v4.3.0
+        with:
+          name: python-coverage-${{ matrix.os }}-${{ matrix.python-version }}
+          path: |
+            htmlcov/
+            coverage.xml
+          retention-days: 7
+
+  # Database integration tests
+  integration-tests:
+    name: Integration (${{ matrix.database }})
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    
+    strategy:
+      fail-fast: false
+      matrix:
+        database:
+          - postgres:14
+          - postgres:15
+          - postgres:16
+          - mysql:8.0
+          - redis:7
+          - mongodb:6.0
+        include:
+          - database: postgres:14
+            db-port: 5432
+            health-cmd: pg_isready
+          - database: mysql:8.0
+            db-port: 3306
+            health-cmd: mysqladmin ping
+          - database: redis:7
+            db-port: 6379
+            health-cmd: redis-cli ping
+          - database: mongodb:6.0
+            db-port: 27017
+            health-cmd: mongosh --eval "db.adminCommand('ping')"
+    
+    services:
+      database:
+        image: ${{ matrix.database }}
+        ports:
+          - ${{ matrix.db-port }}:${{ matrix.db-port }}
+        env:
+          POSTGRES_PASSWORD: testpassword
+          POSTGRES_DB: testdb
+          MYSQL_ROOT_PASSWORD: testpassword
+          MYSQL_DATABASE: testdb
+        options: >-
+          --health-cmd "${{ matrix.health-cmd }}"
+          --health-interval 10s
+          --health-timeout 5s
+          --health-retries 5
+    
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@b4ffde65f46336ab88eb53be808477a3936bae11 # v4.1.1
+
+      - name: Setup Node.js
+        uses: actions/setup-node@60edb5dd545a775178f52524783378180af0d1f8 # v4.0.2
+        with:
+          node-version: '20'
+          cache: 'npm'
+
+      - name: Install dependencies
+        run: npm ci
+
+      - name: Run integration tests
+        run: npm run test:integration
+        env:
+          DATABASE_URL: ${{ matrix.database }}
+          DB_PORT: ${{ matrix.db-port }}
+
+  # Results aggregation
+  test-results:
+    name: Test Results Summary
+    runs-on: ubuntu-latest
+    if: always()
+    needs: [test-matrix, browser-tests, docker-multiplatform, python-matrix, integration-tests]
+    
+    steps:
+      - name: Check test results
+        run: |
+          echo "## 📊 Matrix Test Results" >> $GITHUB_STEP_SUMMARY
+          echo "" >> $GITHUB_STEP_SUMMARY
+          echo "| Job | Status |" >> $GITHUB_STEP_SUMMARY
+          echo "|-----|--------|" >> $GITHUB_STEP_SUMMARY
+          echo "| Node.js Matrix | ${{ needs.test-matrix.result }} |" >> $GITHUB_STEP_SUMMARY
+          echo "| Browser Tests | ${{ needs.browser-tests.result }} |" >> $GITHUB_STEP_SUMMARY
+          echo "| Docker Multi-platform | ${{ needs.docker-multiplatform.result }} |" >> $GITHUB_STEP_SUMMARY
+          echo "| Python Matrix | ${{ needs.python-matrix.result }} |" >> $GITHUB_STEP_SUMMARY
+          echo "| Integration Tests | ${{ needs.integration-tests.result }} |" >> $GITHUB_STEP_SUMMARY
+          
+          if [[ "${{ needs.test-matrix.result }}" == "failure" ]] || \
+             [[ "${{ needs.browser-tests.result }}" == "failure" ]] || \
+             [[ "${{ needs.docker-multiplatform.result }}" == "failure" ]] || \
+             [[ "${{ needs.python-matrix.result }}" == "failure" ]] || \
+             [[ "${{ needs.integration-tests.result }}" == "failure" ]]; then
+            echo "" >> $GITHUB_STEP_SUMMARY
+            echo "❌ **One or more test suites failed**" >> $GITHUB_STEP_SUMMARY
+            exit 1
+          else
+            echo "" >> $GITHUB_STEP_SUMMARY
+            echo "✅ **All test suites passed**" >> $GITHUB_STEP_SUMMARY
+          fi

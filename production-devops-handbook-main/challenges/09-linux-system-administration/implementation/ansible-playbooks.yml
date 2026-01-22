@@ -1,0 +1,289 @@
+---
+# Ansible Playbook: Baseline Server Configuration
+# Applies consistent configuration across all servers
+#
+# Usage: ansible-playbook -i inventory/hosts.yml baseline-config.yml
+
+- name: Configure baseline server settings
+  hosts: all
+  become: yes
+  
+  vars:
+    timezone: "UTC"
+    ntp_servers:
+      - "0.pool.ntp.org"
+      - "1.pool.ntp.org"
+      - "2.pool.ntp.org"
+    admin_users:
+      - name: "admin"
+        ssh_key: "ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAIExample... admin@example.com"
+    
+  tasks:
+    # System Updates
+    - name: Update apt cache (Debian/Ubuntu)
+      apt:
+        update_cache: yes
+        cache_valid_time: 3600
+      when: ansible_os_family == "Debian"
+    
+    - name: Update yum cache (RHEL/CentOS)
+      yum:
+        update_cache: yes
+      when: ansible_os_family == "RedHat"
+    
+    # Timezone Configuration
+    - name: Set timezone
+      community.general.timezone:
+        name: "{{ timezone }}"
+    
+    # Install Essential Packages
+    - name: Install essential packages (Debian/Ubuntu)
+      apt:
+        name:
+          - vim
+          - git
+          - curl
+          - wget
+          - htop
+          - iotop
+          - net-tools
+          - sysstat
+          - rsync
+          - unzip
+          - tree
+        state: present
+      when: ansible_os_family == "Debian"
+    
+    - name: Install essential packages (RHEL/CentOS)
+      yum:
+        name:
+          - vim
+          - git
+          - curl
+          - wget
+          - htop
+          - iotop
+          - net-tools
+          - sysstat
+          - rsync
+          - unzip
+          - tree
+        state: present
+      when: ansible_os_family == "RedHat"
+    
+    # NTP Configuration
+    - name: Install chrony for time synchronization
+      package:
+        name: chrony
+        state: present
+    
+    - name: Configure chrony NTP servers
+      template:
+        src: templates/chrony.conf.j2
+        dest: /etc/chrony/chrony.conf
+      notify: Restart chrony
+    
+    - name: Enable and start chrony
+      service:
+        name: chronyd
+        state: started
+        enabled: yes
+    
+    # User Management
+    - name: Create admin group
+      group:
+        name: admin
+        state: present
+    
+    - name: Create admin users
+      user:
+        name: "{{ item.name }}"
+        groups: admin,sudo
+        shell: /bin/bash
+        createhome: yes
+      loop: "{{ admin_users }}"
+    
+    - name: Add SSH keys for admin users
+      authorized_key:
+        user: "{{ item.name }}"
+        key: "{{ item.ssh_key }}"
+        state: present
+      loop: "{{ admin_users }}"
+    
+    # Security Configuration
+    - name: Configure sudo for admin group
+      lineinfile:
+        path: /etc/sudoers.d/admin
+        line: '%admin ALL=(ALL) NOPASSWD: ALL'
+        create: yes
+        mode: '0440'
+        validate: 'visudo -cf %s'
+    
+    - name: Set MOTD
+      copy:
+        content: |
+          ========================================
+          {{ ansible_hostname }}
+          ========================================
+          OS: {{ ansible_distribution }} {{ ansible_distribution_version }}
+          Kernel: {{ ansible_kernel }}
+          
+          Managed by Ansible
+          Last update: {{ ansible_date_time.iso8601 }}
+          ========================================
+        dest: /etc/motd
+    
+    # System Limits
+    - name: Configure system limits
+      pam_limits:
+        domain: '*'
+        limit_type: "{{ item.type }}"
+        limit_item: "{{ item.item }}"
+        value: "{{ item.value }}"
+      loop:
+        - { type: 'soft', item: 'nofile', value: '65536' }
+        - { type: 'hard', item: 'nofile', value: '65536' }
+        - { type: 'soft', item: 'nproc', value: '4096' }
+        - { type: 'hard', item: 'nproc', value: '4096' }
+    
+    # Log Rotation
+    - name: Configure logrotate
+      copy:
+        content: |
+          /var/log/syslog {
+              daily
+              rotate 14
+              compress
+              delaycompress
+              notifempty
+              create 0640 syslog adm
+              sharedscripts
+              postrotate
+                  /usr/lib/rsyslog/rsyslog-rotate
+              endscript
+          }
+        dest: /etc/logrotate.d/syslog
+    
+    # Ensure services are running
+    - name: Ensure SSH is running
+      service:
+        name: sshd
+        state: started
+        enabled: yes
+    
+    - name: Ensure cron is running
+      service:
+        name: cron
+        state: started
+        enabled: yes
+      when: ansible_os_family == "Debian"
+    
+    - name: Ensure crond is running
+      service:
+        name: crond
+        state: started
+        enabled: yes
+      when: ansible_os_family == "RedHat"
+  
+  handlers:
+    - name: Restart chrony
+      service:
+        name: chronyd
+        state: restarted
+
+# Second playbook: Security Hardening
+- name: Apply security hardening
+  hosts: all
+  become: yes
+  
+  tasks:
+    - name: Copy security hardening script
+      copy:
+        src: ../implementation/security-hardening.sh
+        dest: /tmp/security-hardening.sh
+        mode: '0755'
+    
+    - name: Run security hardening script
+      command: /tmp/security-hardening.sh
+      register: hardening_output
+    
+    - name: Display hardening results
+      debug:
+        var: hardening_output.stdout_lines
+
+# Third playbook: Monitoring Setup
+- name: Install monitoring agents
+  hosts: all
+  become: yes
+  
+  vars:
+    prometheus_version: "1.7.0"
+    node_exporter_port: 9100
+  
+  tasks:
+    - name: Create node_exporter user
+      user:
+        name: node_exporter
+        shell: /bin/false
+        system: yes
+        create_home: no
+    
+    - name: Download node_exporter
+      get_url:
+        url: "https://github.com/prometheus/node_exporter/releases/download/v{{ prometheus_version }}/node_exporter-{{ prometheus_version }}.linux-amd64.tar.gz"
+        dest: "/tmp/node_exporter.tar.gz"
+    
+    - name: Extract node_exporter
+      unarchive:
+        src: "/tmp/node_exporter.tar.gz"
+        dest: "/tmp"
+        remote_src: yes
+    
+    - name: Copy node_exporter binary
+      copy:
+        src: "/tmp/node_exporter-{{ prometheus_version }}.linux-amd64/node_exporter"
+        dest: "/usr/local/bin/node_exporter"
+        mode: '0755'
+        remote_src: yes
+    
+    - name: Create node_exporter systemd service
+      copy:
+        content: |
+          [Unit]
+          Description=Node Exporter
+          After=network.target
+          
+          [Service]
+          User=node_exporter
+          Group=node_exporter
+          Type=simple
+          ExecStart=/usr/local/bin/node_exporter
+          
+          [Install]
+          WantedBy=multi-user.target
+        dest: /etc/systemd/system/node_exporter.service
+    
+    - name: Reload systemd
+      systemd:
+        daemon_reload: yes
+    
+    - name: Enable and start node_exporter
+      service:
+        name: node_exporter
+        state: started
+        enabled: yes
+    
+    - name: Allow node_exporter port in firewall (UFW)
+      ufw:
+        rule: allow
+        port: "{{ node_exporter_port }}"
+        proto: tcp
+      when: ansible_os_family == "Debian"
+    
+    - name: Allow node_exporter port in firewall (firewalld)
+      firewalld:
+        port: "{{ node_exporter_port }}/tcp"
+        permanent: yes
+        state: enabled
+        immediate: yes
+      when: ansible_os_family == "RedHat"

@@ -1,0 +1,102 @@
+# Composite Action: Setup Environment with Smart Caching
+# Location: composite-actions/setup-environment/action.yml
+# Description: Sets up language runtime with optimized dependency caching
+
+name: 'Setup Environment'
+description: 'Setup language runtime with intelligent dependency caching'
+author: 'Omade'
+
+inputs:
+  language:
+    description: 'Programming language (node, python, java, go, dotnet)'
+    required: true
+  version:
+    description: 'Language version (e.g., 18, 3.11, 17, 1.20)'
+    required: false
+    default: 'latest'
+  cache-dependency-path:
+    description: 'Path to dependency files for cache key generation'
+    required: false
+    default: ''
+  install-dependencies:
+    description: 'Automatically install dependencies'
+    required: false
+    default: 'false'
+
+outputs:
+  cache-hit:
+    description: 'Whether cache was hit'
+    value: ${{ steps.cache.outputs.cache-hit }}
+  runtime-version:
+    description: 'Actual runtime version installed'
+    value: ${{ steps.version.outputs.version }}
+
+runs:
+  using: 'composite'
+  steps:
+    - name: Setup Node.js
+      if: inputs.language == 'node'
+      uses: actions/setup-node@60edb5dd545a775178f52524783378180af0d1f8 # v4.0.2
+      with:
+        node-version: ${{ inputs.version }}
+        cache: 'npm'
+        cache-dependency-path: ${{ inputs.cache-dependency-path }}
+
+    - name: Setup Python
+      if: inputs.language == 'python'
+      uses: actions/setup-python@0a5c61591373683505ea898e09a3ea4f39ef2b9c # v5.0.0
+      with:
+        python-version: ${{ inputs.version }}
+        cache: 'pip'
+        cache-dependency-path: ${{ inputs.cache-dependency-path }}
+
+    - name: Setup Java
+      if: inputs.language == 'java'
+      uses: actions/setup-java@99b8673ff64fbf99d8d325f52d9a5bdedb8483e9 # v4.2.1
+      with:
+        java-version: ${{ inputs.version }}
+        distribution: 'temurin'
+        cache: 'maven'
+
+    - name: Setup Go
+      if: inputs.language == 'go'
+      uses: actions/setup-go@0c52d547c9bc32b1aa3301fd7a9cb496313a4491 # v5.0.0
+      with:
+        go-version: ${{ inputs.version }}
+        cache: true
+
+    - name: Setup .NET
+      if: inputs.language == 'dotnet'
+      uses: actions/setup-dotnet@4d6c8fcf3c8f7a60068d26b594648e99df24cee3 # v4.0.0
+      with:
+        dotnet-version: ${{ inputs.version }}
+
+    - name: Install dependencies
+      if: inputs.install-dependencies == 'true'
+      shell: bash
+      run: |
+        case "${{ inputs.language }}" in
+          node)
+            npm ci --prefer-offline --no-audit
+            ;;
+          python)
+            pip install -r requirements.txt
+            ;;
+          java)
+            if [ -f "mvnw" ]; then
+              ./mvnw dependency:go-offline
+            elif [ -f "gradlew" ]; then
+              ./gradlew dependencies
+            fi
+            ;;
+          go)
+            go mod download
+            ;;
+          dotnet)
+            dotnet restore
+            ;;
+        esac
+
+branding:
+  icon: 'settings'
+  color: 'green'

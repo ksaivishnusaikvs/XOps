@@ -1,0 +1,48 @@
+# KServe Model Serving Configuration
+# This YAML defines InferenceServices for deploying ML models in production
+
+---
+# Scikit-learn Model Serving
+apiVersion: serving.kserve.io/v1beta1
+kind: InferenceService
+metadata:
+  name: sklearn-model
+  namespace: ml-serving
+spec:
+  predictor:
+    serviceAccountName: sa-minio-kserve
+    model:
+      modelFormat:
+        name: sklearn
+      storageUri: "s3://mlflow/models/sklearn-model"
+      resources:
+        limits:
+          cpu: "1"
+          memory: 2Gi
+        requests:
+          cpu: "100m"
+          memory: 1Gi
+    minReplicas: 2
+    maxReplicas: 10
+    scaleTarget: 80
+    scaleMetric: concurrency
+---
+# PyTorch LLM Model Serving
+apiVersion: serving.kserve.io/v1beta1
+kind: InferenceService
+metadata:
+  name: pytorch-llm
+  namespace: ml-serving
+spec:
+  predictor:
+    pytorch:
+      storageUri: "s3://models/llm-model"
+      resources:
+        limits:
+          nvidia.com/gpu: "1"
+          memory: 16Gi
+        requests:
+          nvidia.com/gpu: "1"
+          memory: 8Gi
+    minReplicas: 1
+    maxReplicas: 5

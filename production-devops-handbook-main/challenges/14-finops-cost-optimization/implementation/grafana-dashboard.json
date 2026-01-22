@@ -1,0 +1,70 @@
+{
+  "dashboard": {
+    "title": "FinOps Cost Management Dashboard",
+    "tags": ["finops", "cost", "aws"],
+    "timezone": "UTC",
+    "panels": [
+      {
+        "title": "Total Monthly Cost",
+        "type": "stat",
+        "targets": [
+          {
+            "expr": "sum(aws_cost_total)"
+          }
+        ]
+      },
+      {
+        "title": "Cost by Service",
+        "type": "pie",
+        "targets": [
+          {
+            "expr": "sum by (service) (aws_cost_by_service)"
+          }
+        ]
+      },
+      {
+        "title": "Cost Trend (30 Days)",
+        "type": "graph",
+        "targets": [
+          {
+            "expr": "aws_cost_daily"
+          }
+        ]
+      },
+      {
+        "title": "Budget Utilization",
+        "type": "gauge",
+        "targets": [
+          {
+            "expr": "(sum(aws_actual_spend) / sum(aws_budget_limit)) * 100"
+          }
+        ],
+        "options": {
+          "thresholds": [
+            {"value": 80, "color": "yellow"},
+            {"value": 90, "color": "orange"},
+            {"value": 100, "color": "red"}
+          ]
+        }
+      },
+      {
+        "title": "Untagged Resources Cost",
+        "type": "stat",
+        "targets": [
+          {
+            "expr": "sum(aws_cost_untagged)"
+          }
+        ]
+      },
+      {
+        "title": "RI/SP Coverage",
+        "type": "gauge",
+        "targets": [
+          {
+            "expr": "avg(aws_ri_coverage_percentage)"
+          }
+        ]
+      }
+    ]
+  }
+}

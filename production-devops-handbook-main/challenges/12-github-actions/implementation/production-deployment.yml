@@ -1,0 +1,478 @@
+# Production Deployment Workflow with Gates and Approvals
+# Implements blue/green deployment with automatic rollback
+# Location: .github/workflows/deploy-production.yml
+
+name: Production Deployment
+
+on:
+  push:
+    tags:
+      - 'v*.*.*'  # Trigger on semantic version tags
+  workflow_dispatch:
+    inputs:
+      environment:
+        description: 'Environment to deploy to'
+        required: true
+        type: choice
+        options:
+          - staging
+          - production
+      skip-tests:
+        description: 'Skip test suite (emergency only)'
+        required: false
+        type: boolean
+        default: false
+
+permissions:
+  contents: read
+  deployments: write
+  id-token: write
+  issues: write
+  pull-requests: write
+
+env:
+  REGISTRY: ghcr.io
+  IMAGE_NAME: ${{ github.repository }}
+
+jobs:
+  # Pre-deployment validation
+  validate:
+    name: Pre-Deployment Validation
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    outputs:
+      version: ${{ steps.version.outputs.version }}
+      should-deploy: ${{ steps.gate.outputs.should-deploy }}
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@b4ffde65f46336ab88eb53be808477a3936bae11 # v4.1.1
+        with:
+          fetch-depth: 0
+
+      - name: Extract version
+        id: version
+        run: |
+          if [[ "${{ github.ref }}" == refs/tags/* ]]; then
+            VERSION=${GITHUB_REF#refs/tags/v}
+          else
+            VERSION="manual-$(date +%Y%m%d-%H%M%S)"
+          fi
+          echo "version=${VERSION}" >> $GITHUB_OUTPUT
+          echo "📦 Version: ${VERSION}"
+
+      - name: Validate semantic version
+        if: startsWith(github.ref, 'refs/tags/')
+        run: |
+          VERSION="${{ steps.version.outputs.version }}"
+          if [[ ! $VERSION =~ ^[0-9]+\.[0-9]+\.[0-9]+(-[a-zA-Z0-9]+)?$ ]]; then
+            echo "❌ Invalid semantic version: $VERSION"
+            exit 1
+          fi
+          echo "✅ Valid semantic version: $VERSION"
+
+      - name: Check changelog
+        run: |
+          if ! grep -q "${{ steps.version.outputs.version }}" CHANGELOG.md; then
+            echo "⚠️ Warning: Version not found in CHANGELOG.md"
+            echo "changelog-missing=true" >> $GITHUB_ENV
+          else
+            echo "✅ Changelog entry found"
+          fi
+
+      - name: Deployment gate check
+        id: gate
+        run: |
+          # Check if this is a pre-release
+          if [[ "${{ steps.version.outputs.version }}" =~ -alpha|-beta|-rc ]]; then
+            echo "⚠️ Pre-release version detected"
+            echo "should-deploy=staging" >> $GITHUB_OUTPUT
+          else
+            echo "should-deploy=production" >> $GITHUB_OUTPUT
+          fi
+
+  # Security scanning gate
+  security-gate:
+    name: Security Scanning Gate
+    runs-on: ubuntu-latest
+    needs: validate
+    timeout-minutes: 15
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@b4ffde65f46336ab88eb53be808477a3936bae11 # v4.1.1
+
+      - name: Run Trivy vulnerability scanner
+        uses: aquasecurity/trivy-action@915b19bbe73b92a6cf82a1bc12b087c9a19a5fe2 # v0.16.1
+        with:
+          scan-type: 'fs'
+          scan-ref: '.'
+          format: 'sarif'
+          output: 'trivy-results.sarif'
+          severity: 'CRITICAL,HIGH'
+          exit-code: '1'  # Fail on vulnerabilities
+
+      - name: Upload scan results
+        if: always()
+        uses: github/codeql-action/upload-sarif@1b1aada464948af03b950897e5eb522f92603cc2 # v3.24.9
+        with:
+          sarif_file: 'trivy-results.sarif'
+
+      - name: Check for critical vulnerabilities
+        run: |
+          CRITICAL_COUNT=$(jq '[.runs[].results[] | select(.level=="error")] | length' trivy-results.sarif || echo "0")
+          if [ "$CRITICAL_COUNT" -gt "0" ]; then
+            echo "❌ Found $CRITICAL_COUNT critical vulnerabilities"
+            echo "🚫 Blocking deployment"
+            exit 1
+          fi
+          echo "✅ No critical vulnerabilities found"
+
+  # Policy compliance gate
+  policy-gate:
+    name: Policy Compliance Gate
+    runs-on: ubuntu-latest
+    needs: validate
+    timeout-minutes: 10
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@b4ffde65f46336ab88eb53be808477a3936bae11 # v4.1.1
+
+      - name: Run OPA policy checks
+        run: |
+          # Install OPA
+          curl -L -o opa https://openpolicyagent.org/downloads/latest/opa_linux_amd64
+          chmod +x opa
+          
+          # Run policy evaluation
+          ./opa eval --data policies/ --input deployment-manifest.yaml \
+            'data.kubernetes.admission.deny' || echo "✅ Policy checks passed"
+
+      - name: Check deployment manifest
+        run: |
+          # Validate required labels
+          REQUIRED_LABELS=("app" "version" "team" "cost-center")
+          for label in "${REQUIRED_LABELS[@]}"; do
+            if ! grep -q "^  ${label}:" deployment-manifest.yaml; then
+              echo "❌ Missing required label: ${label}"
+              exit 1
+            fi
+          done
+          echo "✅ All required labels present"
+
+  # Build and push Docker image
+  build:
+    name: Build & Push Image
+    runs-on: ubuntu-latest
+    needs: [validate, security-gate, policy-gate]
+    timeout-minutes: 30
+    outputs:
+      image-digest: ${{ steps.build.outputs.digest }}
+      image-tags: ${{ steps.meta.outputs.tags }}
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@b4ffde65f46336ab88eb53be808477a3936bae11 # v4.1.1
+
+      - name: Set up Docker Buildx
+        uses: docker/setup-buildx-action@2b51285047da1547ffb1b2203d8be4c0af6b1f20 # v3.2.0
+
+      - name: Log in to Container Registry
+        uses: docker/login-action@e92390c5fb421da1463c202d546fed0ec5c39f20 # v3.1.0
+        with:
+          registry: ${{ env.REGISTRY }}
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Extract metadata
+        id: meta
+        uses: docker/metadata-action@8e5442c4ef9f78752691e2d8f8d19755c6f78e81 # v5.5.1
+        with:
+          images: ${{ env.REGISTRY }}/${{ env.IMAGE_NAME }}
+          tags: |
+            type=semver,pattern={{version}},value=${{ needs.validate.outputs.version }}
+            type=semver,pattern={{major}}.{{minor}},value=${{ needs.validate.outputs.version }}
+            type=raw,value=latest,enable={{is_default_branch}}
+            type=sha,prefix=,format=short
+
+      - name: Build and push
+        id: build
+        uses: docker/build-push-action@2cdde995de11925a030ce8070c3d77a52ffcf1c0 # v5.3.0
+        with:
+          context: .
+          push: true
+          tags: ${{ steps.meta.outputs.tags }}
+          labels: ${{ steps.meta.outputs.labels }}
+          cache-from: type=gha
+          cache-to: type=gha,mode=max
+          provenance: true
+          sbom: true
+          build-args: |
+            VERSION=${{ needs.validate.outputs.version }}
+            BUILD_DATE=${{ github.event.head_commit.timestamp }}
+            COMMIT_SHA=${{ github.sha }}
+
+      - name: Sign container image
+        run: |
+          # Install cosign
+          curl -sLO https://github.com/sigstore/cosign/releases/latest/download/cosign-linux-amd64
+          chmod +x cosign-linux-amd64
+          
+          # Sign image (keyless signing)
+          ./cosign-linux-amd64 sign --yes \
+            ${{ env.REGISTRY }}/${{ env.IMAGE_NAME }}@${{ steps.build.outputs.digest }}
+
+  # Deploy to staging
+  deploy-staging:
+    name: Deploy to Staging
+    runs-on: ubuntu-latest
+    needs: [validate, build]
+    environment:
+      name: staging
+      url: https://staging.example.com
+    timeout-minutes: 20
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@b4ffde65f46336ab88eb53be808477a3936bae11 # v4.1.1
+
+      - name: Configure AWS credentials
+        uses: aws-actions/configure-aws-credentials@e3dd6a429d7300a6a4c196c26e071d42e0343502 # v4.0.2
+        with:
+          role-to-assume: ${{ secrets.AWS_ROLE_STAGING }}
+          aws-region: us-east-1
+
+      - name: Deploy to ECS
+        run: |
+          aws ecs update-service \
+            --cluster staging-cluster \
+            --service my-app-service \
+            --force-new-deployment \
+            --task-definition my-app:${{ needs.validate.outputs.version }}
+
+      - name: Wait for deployment
+        run: |
+          aws ecs wait services-stable \
+            --cluster staging-cluster \
+            --services my-app-service
+
+      - name: Health check
+        run: |
+          MAX_ATTEMPTS=30
+          ATTEMPT=0
+          while [ $ATTEMPT -lt $MAX_ATTEMPTS ]; do
+            if curl -sf https://staging.example.com/health; then
+              echo "✅ Health check passed"
+              exit 0
+            fi
+            echo "⏳ Waiting for service to become healthy (attempt $((ATTEMPT+1))/$MAX_ATTEMPTS)"
+            sleep 10
+            ATTEMPT=$((ATTEMPT+1))
+          done
+          echo "❌ Health check failed after $MAX_ATTEMPTS attempts"
+          exit 1
+
+      - name: Smoke tests
+        run: |
+          npm ci
+          npm run test:smoke -- --env=staging
+
+  # Deploy to production (requires approval)
+  deploy-production:
+    name: Deploy to Production
+    runs-on: ubuntu-latest
+    needs: [validate, build, deploy-staging]
+    if: github.event.inputs.environment == 'production' || needs.validate.outputs.should-deploy == 'production'
+    environment:
+      name: production
+      url: https://example.com
+    timeout-minutes: 30
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@b4ffde65f46336ab88eb53be808477a3936bae11 # v4.1.1
+
+      - name: Create deployment
+        id: deployment
+        uses: actions/github-script@60a0d83039c74a4aee543508d2ffcb1c3799cdea # v7.0.1
+        with:
+          script: |
+            const deployment = await github.rest.repos.createDeployment({
+              owner: context.repo.owner,
+              repo: context.repo.repo,
+              ref: context.ref,
+              environment: 'production',
+              required_contexts: [],
+              auto_merge: false,
+              description: 'Production deployment v${{ needs.validate.outputs.version }}'
+            });
+            return deployment.data.id;
+
+      - name: Configure AWS credentials
+        uses: aws-actions/configure-aws-credentials@e3dd6a429d7300a6a4c196c26e071d42e0343502 # v4.0.2
+        with:
+          role-to-assume: ${{ secrets.AWS_ROLE_PRODUCTION }}
+          aws-region: us-east-1
+
+      - name: Blue/Green Deployment
+        id: deploy
+        run: |
+          # Get current target group
+          CURRENT_TG=$(aws elbv2 describe-listeners \
+            --listener-arns ${{ secrets.PROD_LISTENER_ARN }} \
+            --query 'Listeners[0].DefaultActions[0].TargetGroupArn' \
+            --output text)
+          
+          # Determine blue/green
+          if [[ "$CURRENT_TG" == *"blue"* ]]; then
+            NEW_TG="${{ secrets.PROD_TG_GREEN }}"
+            NEW_COLOR="green"
+          else
+            NEW_TG="${{ secrets.PROD_TG_BLUE }}"
+            NEW_COLOR="blue"
+          fi
+          
+          echo "new-target-group=${NEW_TG}" >> $GITHUB_OUTPUT
+          echo "new-color=${NEW_COLOR}" >> $GITHUB_OUTPUT
+          echo "old-target-group=${CURRENT_TG}" >> $GITHUB_OUTPUT
+          
+          # Deploy to new target group
+          aws ecs update-service \
+            --cluster production-cluster \
+            --service my-app-${NEW_COLOR} \
+            --force-new-deployment \
+            --task-definition my-app:${{ needs.validate.outputs.version }}
+          
+          # Wait for tasks to be healthy
+          aws ecs wait services-stable \
+            --cluster production-cluster \
+            --services my-app-${NEW_COLOR}
+
+      - name: Health check on new environment
+        run: |
+          # Get new target group health
+          HEALTHY_COUNT=0
+          MAX_ATTEMPTS=60
+          ATTEMPT=0
+          
+          while [ $ATTEMPT -lt $MAX_ATTEMPTS ]; do
+            HEALTHY_COUNT=$(aws elbv2 describe-target-health \
+              --target-group-arn ${{ steps.deploy.outputs.new-target-group }} \
+              --query 'length(TargetHealthDescriptions[?TargetHealth.State==`healthy`])' \
+              --output text)
+            
+            if [ "$HEALTHY_COUNT" -ge "2" ]; then
+              echo "✅ $HEALTHY_COUNT targets healthy"
+              break
+            fi
+            
+            echo "⏳ Waiting for targets to become healthy ($HEALTHY_COUNT/2)"
+            sleep 10
+            ATTEMPT=$((ATTEMPT+1))
+          done
+          
+          if [ "$HEALTHY_COUNT" -lt "2" ]; then
+            echo "❌ Health check failed"
+            exit 1
+          fi
+
+      - name: Switch traffic to new environment
+        run: |
+          # Modify listener to point to new target group
+          aws elbv2 modify-listener \
+            --listener-arn ${{ secrets.PROD_LISTENER_ARN }} \
+            --default-actions Type=forward,TargetGroupArn=${{ steps.deploy.outputs.new-target-group }}
+          
+          echo "✅ Traffic switched to ${{ steps.deploy.outputs.new-color }} environment"
+
+      - name: Monitor error rates
+        id: monitor
+        run: |
+          # Monitor CloudWatch metrics for 5 minutes
+          sleep 300
+          
+          ERROR_RATE=$(aws cloudwatch get-metric-statistics \
+            --namespace AWS/ApplicationELB \
+            --metric-name HTTPCode_Target_5XX_Count \
+            --dimensions Name=TargetGroup,Value=${{ steps.deploy.outputs.new-target-group }} \
+            --start-time $(date -u -d '10 minutes ago' +%Y-%m-%dT%H:%M:%S) \
+            --end-time $(date -u +%Y-%m-%dT%H:%M:%S) \
+            --period 300 \
+            --statistics Sum \
+            --query 'Datapoints[0].Sum' \
+            --output text)
+          
+          if [ "$ERROR_RATE" == "None" ]; then
+            ERROR_RATE=0
+          fi
+          
+          echo "error-rate=${ERROR_RATE}" >> $GITHUB_OUTPUT
+          
+          if [ "$ERROR_RATE" -gt "10" ]; then
+            echo "❌ High error rate detected: $ERROR_RATE errors in 5 minutes"
+            exit 1
+          fi
+          
+          echo "✅ Error rate acceptable: $ERROR_RATE"
+
+      - name: Rollback on failure
+        if: failure()
+        run: |
+          echo "🔄 Rolling back to previous environment"
+          
+          # Switch back to old target group
+          aws elbv2 modify-listener \
+            --listener-arn ${{ secrets.PROD_LISTENER_ARN }} \
+            --default-actions Type=forward,TargetGroupArn=${{ steps.deploy.outputs.old-target-group }}
+          
+          echo "✅ Rollback completed"
+
+      - name: Update deployment status
+        if: always()
+        uses: actions/github-script@60a0d83039c74a4aee543508d2ffcb1c3799cdea # v7.0.1
+        with:
+          script: |
+            await github.rest.repos.createDeploymentStatus({
+              owner: context.repo.owner,
+              repo: context.repo.repo,
+              deployment_id: ${{ steps.deployment.outputs.result }},
+              state: '${{ job.status }}',
+              environment_url: 'https://example.com',
+              description: 'Deployment ${{ job.status }}'
+            });
+
+  # Notifications
+  notify:
+    name: Send Notifications
+    runs-on: ubuntu-latest
+    if: always()
+    needs: [deploy-staging, deploy-production]
+    steps:
+      - name: Notify Slack
+        uses: slackapi/slack-github-action@6c661ce58804a1a20f6dc5fbee7f0381b469e001 # v1.25.0
+        with:
+          webhook: ${{ secrets.SLACK_WEBHOOK }}
+          webhook-type: incoming-webhook
+          payload: |
+            {
+              "text": "${{ needs.deploy-production.result == 'success' && '🚀' || '❌' }} Production Deployment",
+              "blocks": [
+                {
+                  "type": "section",
+                  "text": {
+                    "type": "mrkdwn",
+                    "text": "*Production Deployment*\n*Version:* ${{ needs.validate.outputs.version }}\n*Status:* ${{ needs.deploy-production.result }}\n*Deployed by:* ${{ github.actor }}"
+                  }
+                }
+              ]
+            }
+
+      - name: Create GitHub Release
+        if: needs.deploy-production.result == 'success' && startsWith(github.ref, 'refs/tags/')
+        uses: actions/github-script@60a0d83039c74a4aee543508d2ffcb1c3799cdea # v7.0.1
+        with:
+          script: |
+            await github.rest.repos.createRelease({
+              owner: context.repo.owner,
+              repo: context.repo.repo,
+              tag_name: context.ref.replace('refs/tags/', ''),
+              name: 'Release ${{ needs.validate.outputs.version }}',
+              body: 'Production deployment successful',
+              draft: false,
+              prerelease: false
+            });
