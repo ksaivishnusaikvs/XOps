@@ -1,6 +1,5 @@
-```mermaid
-flowchart LR
-    DevOps["DevOps<br/>Foundation"]
+XOPS
+    DevOps["DevOps<br/>Foundat
 
     CloudOps["CloudOps"]
     SecOps["SecOps"]
